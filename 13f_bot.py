@@ -7,15 +7,8 @@ DISCORD_URL = os.environ.get('SEC_13F_WEBHOOK_URL')
 
 def get_holdings_from_sec(cik, accession_num):
     """SEC에서 13F-HR 공시의 XML 정보를 파싱하여 {주식명: 수량} 딕셔너리를 반환합니다."""
-    headers = {'User-Agent': 'jungseunghun ilman2tv@gmail.com'}
+    headers = {'User-Agent': 'YourName YourEmail@domain.com'}
     acc_clean = accession_num.replace('-', '')
-    
-    # 13F 공시의 상세 파일 목록 주소
-    index_url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
-    # XML 데이터를 찾기 위해 주소 구성
-    # 실제 운영 시 XML 파일명을 정확히 매칭하기 위해 가벼운 파싱을 거치거나 표준 포맷을 추적합니다.
-    # 대다수의 최신 13F는 primary_doc 혹은 정보테이블 xml을 제공합니다.
-    # 여기서는 대가들의 포트폴리오 요약본 정보를 안정적으로 가져옵니다.
     
     holdings = {}
     try:
@@ -34,7 +27,6 @@ def get_holdings_from_sec(cik, accession_num):
                 break
         
         if not xml_file:
-            # table 명칭이 없을 경우 첫 번째 xml 선택
             for f in files:
                 if f.get('name', '').endswith('.xml'):
                     xml_file = f.get('name', '')
@@ -45,7 +37,6 @@ def get_holdings_from_sec(cik, accession_num):
             xml_res = requests.get(xml_url, headers=headers)
             root = ET.fromstring(xml_res.content)
             
-            # SEC 13F 표준 네임스페이스 대응 파싱
             ns = {'ns': root.tag.split('}')[0].strip('{')} if '}' in root.tag else {}
             
             for info in root.findall('.//ns:infoTable', ns) if ns else root.findall('.//infoTable'):
@@ -56,15 +47,16 @@ def get_holdings_from_sec(cik, accession_num):
                 
                 if issuer and shrs_amt is not None:
                     shares = int(shrs_amt.text)
-                    holdings[issuer] = holdings.get(issuer, 0) + shares
+                    # 대문자로 통일하여 저장
+                    issuer_upper = issuer.upper().strip()
+                    holdings[issuer_upper] = holdings.get(issuer_upper, 0) + shares
     except Exception as e:
         print(f"공시 파싱 중 오류 발생 (Accession: {accession_num}): {e}")
         
     return holdings
 
 def get_13f_data():
-    # ⭐ SEC 차단을 예방하기 위해 본인 정보로 수정해 주세요!
-    headers = {'User-Agent': 'YourName YourEmail@domain.com'}
+    headers = {'User-Agent': 'jungseunghun ilman2tv@gmail.com'}
     
     gurus = {
         "버크셔 해서웨이 (워런 버핏)": "0001067983",
@@ -82,24 +74,19 @@ def get_13f_data():
             data = response.json()
             recent_docs = data['filings']['recent']
             
-            # 13F-HR 공시만 필터링하여 리스트업
             f_idx = [i for i, form in enumerate(recent_docs['form']) if form == '13F-HR']
             
             if len(f_idx) < 1:
                 print(f"{name}의 13F 공시를 찾을 수 없습니다.")
                 continue
                 
-            # 최신 분기 공시 정보
             latest_i = f_idx[0]
             filing_date = recent_docs['filingDate'][latest_i]
             latest_acc = recent_docs['accessionNumber'][latest_i]
             
-            # 실제 데이터를 비교하기 위해 최신 분기 데이터 파싱
             current_holdings = get_holdings_from_sec(cik, latest_acc)
-            
             trades = []
             
-            # 만약 직전 분기 공시가 존재하면 수량 대조 시작
             if len(f_idx) >= 2:
                 prev_i = f_idx[1]
                 prev_acc = recent_docs['accessionNumber'][prev_i]
@@ -127,18 +114,51 @@ def get_13f_data():
                             pct = (diff / prev_shares) * 100
                             trades.append({"ticker": ticker, "action": "매도 🔴", "shares": f"-{diff:,} 주", "change": f"-{pct:.1f}%"})
             else:
-                # 과거 데이터가 없는 경우 현재 보유 상위 주식들만 노출
                 sorted_holdings = sorted(current_holdings.items(), key=lambda x: x[1], reverse=True)[:5]
                 for ticker, shares in sorted_holdings:
                     trades.append({"ticker": ticker, "action": "보유 🪙", "shares": f"{shares:,} 주", "change": "보유중"})
             
-            # 디스코드는 메시지당 글자수 제한(2000자)이 있으므로 주요 변동사항 상위 12개만 추려 전송
+            # 주요 변동사항 상위 12개만 추려 전송
             trades = trades[:12] if trades else []
-            
             send_to_discord(name, filing_date, trades)
             
         except Exception as e:
             print(f"{name} 데이터 가져오기 실패: {e}")
+
+def convert_corporate_name(raw_name):
+    """💡 복잡하고 긴 미국 법인명을 개인 투자자에게 친숙한 티커와 이름으로 변환합니다."""
+    # 자주 등장하는 거장들의 핵심 보유 종목 변환 사전
+    name_dict = {
+        "APPLE INC": "AAPL (애플)",
+        "NVIDIA CORP": "NVDA (엔비디아)",
+        "MICROSOFT CORP": "MSFT (마이크로)",
+        "AMAZON COM INC": "AMZN (아마존)",
+        "REALTY INCOME CORP": "O (리얼티인컴)",
+        "ALPHABET INC": "GOOGL (구글)",
+        "META PLATFORMS INC": "META (메타)",
+        "TESLA INC": "TSLA (테슬라)",
+        "BERKSHIRE HATHAWAY INC": "BRK (버크셔)",
+        "JPMORGAN CHASE & CO": "JPM (제이피모간)",
+        "CHEVRON CORP NEW": "CVX (셰브론)",
+        "BANK AMERICA CORP": "BAC (뱅크오브A)",
+        "COCA COLA CO": "KO (코카콜라)",
+        "COSTCO WHOLESALE CORP NEW": "COST (코스트코)",
+        "NETFLIX INC": "NFLX (넷플릭스)",
+        "BROADCOM INC": "AVGO (브로드컴)",
+        "EXXON MOBIL CORP": "XOM (엑슨모빌)",
+        "VISA INC": "V (비자카드)",
+        "PROCTER & GAMBLE CO": "PG (P&G)",
+        "PFIZER INC": "PFE (화이자)",
+        "VERIZON COMMUNICATIONS INC": "VZ (버라이즌)",
+        "SCHWAB CHARLES CORP": "SCHW (찰스슈왑)"
+    }
+    
+    # 사전에 있으면 변환된 이름을, 없으면 앞 글자 14자만 깔끔하게 잘라서 반환
+    for key, value in name_dict.items():
+        if key in raw_name:
+            return value
+            
+    return raw_name[:14].strip()
 
 def send_to_discord(guru_name, date, trades):
     try:
@@ -159,12 +179,13 @@ def send_to_discord(guru_name, date, trades):
     new_list = ""
     
     for t in trades:
-        # 긴 회사명은 깔끔하게 잘라줍니다.
-        display_ticker = t['ticker'][:12]
-        line = f" ` {display_ticker:<12} ` ｜ **{t['shares']}** `({t['change']})`\n"
+        # 💡 법인명을 보기 좋은 한글/티커 조합으로 가공합니다.
+        clean_name = convert_corporate_name(t['ticker'])
+        # 디스코드 가로 줄맞춤을 위해 14글자 포맷팅 적용
+        line = f" ` {clean_name:<14} ` ｜ **{t['shares']}** `({t['change']})`\n"
         
         if "매도" in t['action']:
-            sell_list += f"残留 {line}" if "전량" in t['action'] else f"📉 {line}"
+            sell_list += f"📉 {line}"
         elif "매수" in t['action']:
             buy_list += f"📈 {line}"
         elif "신규" in t['action']:
