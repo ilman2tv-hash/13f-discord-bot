@@ -7,12 +7,11 @@ DISCORD_URL = os.environ.get('SEC_13F_WEBHOOK_URL')
 
 def get_holdings_from_sec(cik, accession_num):
     """SEC에서 13F-HR 공시의 XML 정보를 파싱하여 {주식명: 수량} 딕셔너리를 반환합니다."""
-    headers = {'User-Agent': 'YourName YourEmail@domain.com'}
+    headers = {'User-Agent': 'jungseunghun ilman2tv@gmail.com'}
     acc_clean = accession_num.replace('-', '')
     
     holdings = {}
     try:
-        # SEC EDGAR에서 해당 공시 폴더의 파일 목록 조회
         folder_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/index.json"
         res = requests.get(folder_url, headers=headers)
         if res.status_code != 200:
@@ -47,7 +46,6 @@ def get_holdings_from_sec(cik, accession_num):
                 
                 if issuer and shrs_amt is not None:
                     shares = int(shrs_amt.text)
-                    # 대문자로 통일하여 저장
                     issuer_upper = issuer.upper().strip()
                     holdings[issuer_upper] = holdings.get(issuer_upper, 0) + shares
     except Exception as e:
@@ -56,7 +54,7 @@ def get_holdings_from_sec(cik, accession_num):
     return holdings
 
 def get_13f_data():
-    headers = {'User-Agent': 'jungseunghun ilman2tv@gmail.com'}
+    headers = {'User-Agent': 'YourName YourEmail@domain.com'}
     
     gurus = {
         "버크셔 해서웨이 (워런 버핏)": "0001067983",
@@ -92,7 +90,6 @@ def get_13f_data():
                 prev_acc = recent_docs['accessionNumber'][prev_i]
                 prev_holdings = get_holdings_from_sec(cik, prev_acc)
                 
-                # 매수 및 신규진입 계산
                 for ticker, cur_shares in current_holdings.items():
                     if ticker not in prev_holdings:
                         trades.append({"ticker": ticker, "action": "신규진입 🔥", "shares": f"{cur_shares:,} 주", "change": "New"})
@@ -103,7 +100,6 @@ def get_13f_data():
                             pct = (diff / prev_shares) * 100
                             trades.append({"ticker": ticker, "action": "매수 🟢", "shares": f"+{diff:,} 주", "change": f"+{pct:.1f}%"})
                             
-                # 매도 계산
                 for ticker, prev_shares in prev_holdings.items():
                     if ticker not in current_holdings:
                         trades.append({"ticker": ticker, "action": "전량매도 🔴", "shares": f"-{prev_shares:,} 주", "change": "-100%"})
@@ -118,7 +114,6 @@ def get_13f_data():
                 for ticker, shares in sorted_holdings:
                     trades.append({"ticker": ticker, "action": "보유 🪙", "shares": f"{shares:,} 주", "change": "보유중"})
             
-            # 주요 변동사항 상위 12개만 추려 전송
             trades = trades[:12] if trades else []
             send_to_discord(name, filing_date, trades)
             
@@ -126,38 +121,49 @@ def get_13f_data():
             print(f"{name} 데이터 가져오기 실패: {e}")
 
 def convert_corporate_name(raw_name):
-    """💡 복잡하고 긴 미국 법인명을 개인 투자자에게 친숙한 티커와 이름으로 변환합니다."""
-    # 자주 등장하는 거장들의 핵심 보유 종목 변환 사전
+    """💡 복잡하고 긴 미국 법인명을 한국 주식 투자자에게 친숙한 티커와 이름으로 매칭합니다."""
     name_dict = {
+        # 🇺🇸 주요 대형 성장주 및 기술주
         "APPLE INC": "AAPL (애플)",
         "NVIDIA CORP": "NVDA (엔비디아)",
         "MICROSOFT CORP": "MSFT (마이크로)",
         "AMAZON COM INC": "AMZN (아마존)",
-        "REALTY INCOME CORP": "O (리얼티인컴)",
         "ALPHABET INC": "GOOGL (구글)",
         "META PLATFORMS INC": "META (메타)",
         "TESLA INC": "TSLA (테슬라)",
-        "BERKSHIRE HATHAWAY INC": "BRK (버크셔)",
-        "JPMORGAN CHASE & CO": "JPM (제이피모간)",
-        "CHEVRON CORP NEW": "CVX (셰브론)",
-        "BANK AMERICA CORP": "BAC (뱅크오브A)",
-        "COCA COLA CO": "KO (코카콜라)",
-        "COSTCO WHOLESALE CORP NEW": "COST (코스트코)",
-        "NETFLIX INC": "NFLX (넷플릭스)",
         "BROADCOM INC": "AVGO (브로드컴)",
+        "NETFLIX INC": "NFLX (넷플릭스)",
+        "SUPER MICRO COMPUTER": "SMCI (슈퍼마이크로)",
+        "COREWEAVE": "CoreWeave (코어위브)",
+        
+        # 💰 배당 성장 / 가치 / 인컴형 주식 및 주요 ETF
+        "REALTY INCOME CORP": "O (리얼티인컴)",
+        "SCHWAB STRATEGIC TR": "SCHD / ETF",  # SCHD 배당 ETF 커버
+        "JPMORGAN CHASE & CO": "JPM (제이피모간)",
+        "BERKSHIRE HATHAWAY": "BRK (버크셔)",
+        "COCA COLA CO": "KO (코카콜라)",
+        "BANK AMERICA CORP": "BAC (뱅크오브A)",
+        "CHEVRON CORP NEW": "CVX (셰브론)",
+        "COSTCO WHOLESALE": "COST (코스트코)",
         "EXXON MOBIL CORP": "XOM (엑슨모빌)",
         "VISA INC": "V (비자카드)",
-        "PROCTER & GAMBLE CO": "PG (P&G)",
+        "PROCTER & GAMBLE": "PG (P&G)",
+        
+        # 📞 통신, 제약 및 방어주 (보유 종목 커버)
+        "VERIZON COMMUNICATIONS": "VZ (버라이즌)",
         "PFIZER INC": "PFE (화이자)",
-        "VERIZON COMMUNICATIONS INC": "VZ (버라이즌)",
-        "SCHWAB CHARLES CORP": "SCHW (찰스슈왑)"
+        "VANGUARD INDEX FUNDS": "VOO / ETF",    # Vanguard S&P 500 등 ETF 커버
+        "ISHARES TRUST": "iShares ETF",
+        "SPDR S&P 500 ETF": "SPY (S&P500)",
+        "INVESCO QQQ TRUST": "QQQ (나스닥100)"
     }
     
-    # 사전에 있으면 변환된 이름을, 없으면 앞 글자 14자만 깔끔하게 잘라서 반환
+    # 사전에 등록된 텍스트가 법인명에 포함되어 있는지 검사
     for key, value in name_dict.items():
         if key in raw_name:
             return value
             
+    # 사전에 없는 낯선 종목은 영문 앞 글자 14자만 잘라서 깔끔하게 유지
     return raw_name[:14].strip()
 
 def send_to_discord(guru_name, date, trades):
@@ -179,9 +185,8 @@ def send_to_discord(guru_name, date, trades):
     new_list = ""
     
     for t in trades:
-        # 💡 법인명을 보기 좋은 한글/티커 조합으로 가공합니다.
         clean_name = convert_corporate_name(t['ticker'])
-        # 디스코드 가로 줄맞춤을 위해 14글자 포맷팅 적용
+        # 깔끔한 열 정렬을 위해 14칸 확보
         line = f" ` {clean_name:<14} ` ｜ **{t['shares']}** `({t['change']})`\n"
         
         if "매도" in t['action']:
