@@ -1,28 +1,32 @@
 name: 13F 공시 알리미 봇
 
+# 💡 어떤 조건에서 이 봇을 실행할지 설정하는 부분입니다.
 on:
+  # 1. 내가 원할 때 언제든 수동으로 실행 가능 (기존 기능)
+  workflow_dispatch:
+
+  # 2. 자동으로 실행되는 스케줄러 추가 (여기가 핵심!)
   schedule:
-    - cron: '0 1 * * *' # 매일 한국 시간 오전 10시에 자동 실행
-  workflow_dispatch: # 수동 실행 버튼 활성화
+    # ⚠️ 깃허브 시간은 세계 표준시(UTC) 기준이라 한국 시간보다 9시간 느립니다.
+    # 아래 설정은 한국 시간으로 [매주 토요일 오전 9시 00분]에 알아서 켜지라는 뜻입니다.
+    - cron: '0 0 * * 6'
 
 jobs:
-  run-bot:
+  build:
     runs-on: ubuntu-latest
     steps:
-    - name: 코드 가져오기
-      uses: actions/checkout@v3
+      - name: 코드 체크아웃
+        uses: actions/checkout@v3
 
-    - name: 파이썬 설치
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      - name: 파이썬 세팅
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
-    - name: 라이브러리 설치
-      run: pip install requests
+      - name: 필수 프로그램 설치
+        run: pip install requests
 
-    - name: 봇 실행
-      env:
-        # 💡 이 부분을 우리가 새로 만든 이름(SEC_13F_WEBHOOK_URL)으로 맞춰줍니다!
-        SEC_13F_WEBHOOK_URL: ${{ secrets.SEC_13F_WEBHOOK_URL }}
-      run: python 13f_bot.py
-
+      - name: 봇 실행
+        env:
+          SEC_13F_WEBHOOK_URL: ${{ secrets.SEC_13F_WEBHOOK_URL }}
+        run: python 13f_bot.py
