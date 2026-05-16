@@ -22,5 +22,7 @@ jobs:
 
     - name: 봇 실행
       env:
-        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        # 💡 이 부분을 우리가 새로 만든 이름(SEC_13F_WEBHOOK_URL)으로 맞춰줍니다!
+        SEC_13F_WEBHOOK_URL: ${{ secrets.SEC_13F_WEBHOOK_URL }}
       run: python 13f_bot.py
+
