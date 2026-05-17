@@ -26,7 +26,7 @@ gurus = {
 # 📌 SEC 요청 헤더
 # =========================================================
 HEADERS = {
-    "User-Agent": "yourname yourmail@example.com",
+    "User-Agent": "jungseunghun ilman2tv@gmail.com",
     "Accept-Encoding": "gzip, deflate",
     "Host": "www.sec.gov"
 }
