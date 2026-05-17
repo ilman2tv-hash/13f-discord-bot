@@ -17,13 +17,14 @@ logging.basicConfig(
 
 ticker_cache = {}
 
-# ====================== Helper Functions ======================
+# ====================== HTTP 요청 ======================
 @tenacity.retry(wait=tenacity.wait_exponential(min=1, max=10), stop=tenacity.stop_after_attempt(4), reraise=True)
 def requests_get(url, **kwargs):
     headers = kwargs.pop('headers', {})
     headers.setdefault('User-Agent', 'jungseunghun ilman2tv@gmail.com')
     return requests.get(url, headers=headers, timeout=15, **kwargs)
 
+# ====================== Ticker 변환 ======================
 def get_ticker_from_cusip(cusip: str) -> str | None:
     if not cusip or len(cusip) < 6:
         return None
@@ -48,7 +49,6 @@ def convert_corporate_name(raw_name: str) -> str:
     name_map = {
         "APPLE INC": "AAPL", "NVIDIA CORP": "NVDA", "MICROSOFT CORP": "MSFT",
         "AMAZON COM INC": "AMZN", "ALPHABET INC": "GOOGL", "META PLATFORMS": "META",
-        "BERKSHIRE HATHAWAY": "BRK.B",
     }
     upper = raw_name.upper().strip()
     for key, ticker in name_map.items():
@@ -76,8 +76,8 @@ def get_holdings_from_sec(cik: str, accession_num: str):
         xml_res = requests_get(xml_url)
         root = ET.fromstring(xml_res.content)
 
-        # ✅ 수정된 부분
-        ns = {'ns': root.tag.split('}')[0].strip('{')}} if '}' in root.tag else {}
+        # ✅ 여기서 에러 수정됨
+        ns = {'ns': root.tag.split('}')[0].strip('{')} if '}' in root.tag else {}
 
         info_tables = (root.findall('.//ns:infoTable', ns) or 
                       root.findall('.//infoTable') or 
@@ -111,7 +111,7 @@ def get_holdings_from_sec(cik: str, accession_num: str):
 
     return holdings
 
-# ====================== 한국식 금액 ======================
+# ====================== 금액 변환 ======================
 def format_korean_value(value_thousands: int) -> str:
     if not value_thousands or value_thousands <= 0:
         return "-"
@@ -153,7 +153,7 @@ def send_combined_discord_report(results):
             elif "New" in change:
                 type_str = "✨ 신규"
                 change_str = "신규진입"
-            elif "+" in change or "매수" in str(t.get('action', '')):
+            elif "+" in change:
                 type_str = "🟢 매수"
                 change_str = change
             else:
