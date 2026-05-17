@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 # GitHub Secrets:
 # SEC_13F_WEBHOOK_URL
 # =========================================================
-DISCORD_URL = os.environ.get("SEC_13F_WEBHOOK_URL")
+DISCORD_URL = "https://discord.com/api/webhooks/1505088722217992203/aJtaq2bVttAPfAL2EDF_L-c8_lg6w0mQ25Eg8udMjhU4LgdAhzGCY0cmqR2II96RWK8M"
 
 # =========================================================
 # 📌 추적 대상 (시장 흐름 + 기관 자금 이동 중심)
