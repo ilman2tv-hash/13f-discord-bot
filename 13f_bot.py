@@ -1,226 +1,292 @@
 import os
 import time
+import logging
 import requests
 import xml.etree.ElementTree as ET
+from datetime import datetime
+from collections import defaultdict
+import tenacity
 
-# 깃허브 Settings -> Secrets에 등록한 13F 전용 디스코드 웹훅 주소
+# ====================== 설정 ======================
 DISCORD_URL = os.environ.get('SEC_13F_WEBHOOK_URL')
 
-def get_ticker_from_cusip(cusip):
-    """💡 CUSIP 금융 번호를 기반으로 실제 영문 티커를 조회합니다."""
-    if not cusip:
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+# Ticker 캐시
+ticker_cache = {}
+
+# ====================== Helper Functions ======================
+@tenacity.retry(wait=tenacity.wait_exponential(min=1, max=10), stop=tenacity.stop_after_attempt(4), reraise=True)
+def requests_get(url, **kwargs):
+    headers = kwargs.pop('headers', {})
+    headers.setdefault('User-Agent', 'jungseunghun ilman2tv@gmail.com')
+    return requests.get(url, headers=headers, timeout=15, **kwargs)
+
+def get_ticker_from_cusip(cusip: str) -> str | None:
+    if not cusip or len(cusip) < 6:
         return None
+    if cusip in ticker_cache:
+        return ticker_cache[cusip]
+
     try:
         url = f"https://query1.finance.yahoo.com/v1/finance/search?q={cusip}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests_get(url)
         if res.status_code == 200:
-            data = res.json()
-            quotes = data.get('quotes', [])
+            quotes = res.json().get('quotes', [])
             if quotes:
-                return quotes[0].get('symbol')
-    except Exception as e:
-        print(f"티커 조회 중 오류 ({cusip}): {e}")
+                ticker = quotes[0].get('symbol')
+                ticker_cache[cusip] = ticker
+                return ticker
+    except:
+        pass
+    ticker_cache[cusip] = None
     return None
 
-def convert_corporate_name(raw_name):
-    """백업용 한글 변환 사전"""
-    name_dict = {
+def convert_corporate_name(raw_name: str) -> str:
+    name_map = {
         "APPLE INC": "AAPL", "NVIDIA CORP": "NVDA", "MICROSOFT CORP": "MSFT",
-        "AMAZON COM INC": "AMZN", "REALTY INCOME CORP": "O", "ALPHABET INC": "GOOGL",
-        "VERIZON COMMUNICATIONS": "VZ", "PFIZER INC": "PFE"
+        "AMAZON COM INC": "AMZN", "ALPHABET INC": "GOOGL", "META PLATFORMS": "META",
+        "BERKSHIRE HATHAWAY": "BRK.B", "JPMORGAN CHASE": "JPM", "EXXON MOBIL": "XOM",
     }
-    for key, value in name_dict.items():
-        if key in raw_name:
-            return value
-    return raw_name[:12]
+    upper = raw_name.upper().strip()
+    for key, ticker in name_map.items():
+        if key in upper:
+            return ticker
+    return ''.join([c for c in upper.split()[0] if c.isalnum()])[:12]
 
-def get_holdings_from_sec(cik, accession_num):
-    """SEC에서 13F-HR 공시의 XML 정보를 파싱하여 {티커: 수량} 딕셔너리를 반환합니다."""
-    headers = {'User-Agent': 'jungseunghun ilman2tv@gmail.com'}
+# ====================== 13F 파싱 ======================
+def get_holdings_from_sec(cik: str, accession_num: str):
     acc_clean = accession_num.replace('-', '')
-    
-    holdings = {}
+    holdings = defaultdict(lambda: {"shares": 0, "value": 0})
+
     try:
         folder_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/index.json"
-        res = requests.get(folder_url, headers=headers, timeout=10)
-        if res.status_code != 200:
-            return holdings
-            
+        res = requests_get(folder_url)
         files = res.json().get('directory', {}).get('item', [])
-        xml_file = next((f.get('name', '') for f in files if f.get('name', '').endswith('.xml') and ('table' in f.get('name', '').lower() or 'information' in f.get('name', '').lower())), "")
-        
+
+        xml_file = next((f['name'] for f in files if f['name'].endswith('.xml') and 'infotable' in f['name'].lower()), None)
         if not xml_file:
-            xml_file = next((f.get('name', '') for f in files if f.get('name', '').endswith('.xml')), "")
-                    
-        if xml_file:
-            xml_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{xml_file}"
-            xml_res = requests.get(xml_url, headers=headers, timeout=10)
-            root = ET.fromstring(xml_res.content)
-            
-            ns = {'ns': root.tag.split('}')[0].strip('{')} if '}' in root.tag else {}
-            
-            count = 0
-            info_tables = root.findall('.//ns:infoTable', ns) if ns else root.findall('.//infoTable')
-            
-            for info in info_tables:
-                if count >= 15:  # 디스코드 전송 가독성을 위해 한 기관당 상위 15개 선에서 제어
-                    break
-                    
-                issuer = info.find('.//ns:nameOfIssuer', ns).text if ns else info.find('.//nameOfIssuer').text
-                cusip = info.find('.//ns:cusip', ns).text if ns else info.find('.//cusip').text
-                shrs_amt = info.find('.//ns:sshPrnamt', ns) if ns else info.find('.//sshPrnamt')
-                if shrs_amt is None:
-                    shrs_amt = info.find('.//ns:ssh_prn_amt', ns) if ns else info.find('.//ssh_prn_amt')
-                
-                if issuer and shrs_amt is not None:
-                    try:
-                        shares = int(shrs_amt.text)
-                    except ValueError:
-                        continue
-                    
-                    ticker = get_ticker_from_cusip(cusip)
-                    time.sleep(0.2)  # 야후 API 차단 방지 딜레이
-                    
-                    if not ticker:
-                        ticker = convert_corporate_name(issuer.upper().strip())
-                    
-                    holdings[ticker] = holdings.get(ticker, 0) + shares
-                    count += 1
-                    
+            xml_file = next((f['name'] for f in files if f['name'].endswith('.xml')), None)
+
+        if not xml_file:
+            return {}
+
+        xml_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{xml_file}"
+        xml_res = requests_get(xml_url)
+        root = ET.fromstring(xml_res.content)
+
+        ns = {'ns': root.tag.split('}')[0].strip('{')}} if '}' in root.tag else {}
+
+        info_tables = (root.findall('.//ns:infoTable', ns) or 
+                      root.findall('.//infoTable') or 
+                      root.findall('.//{*}infoTable'))
+
+        for info in info_tables:
+            def safe_text(tag):
+                for path in [f'.//ns:{tag}', f'.//{tag}', f'.//{{*}}{tag}']:
+                    elem = info.find(path, ns)
+                    if elem is not None and elem.text:
+                        return elem.text.strip()
+                return None
+
+            issuer = safe_text('nameOfIssuer')
+            cusip = safe_text('cusip')
+            shares = safe_text('sshPrnamt') or safe_text('ssh_prn_amt')
+            value = safe_text('value')
+
+            if issuer and shares:
+                try:
+                    shares_int = int(shares)
+                    value_int = int(value) if value else 0
+                    ticker = get_ticker_from_cusip(cusip) or convert_corporate_name(issuer)
+                    if ticker:
+                        holdings[ticker]["shares"] += shares_int
+                        holdings[ticker]["value"] += value_int
+                except:
+                    continue
     except Exception as e:
-        print(f"공시 파싱 중 오류 발생: {e}")
-        
+        logging.error(f"파싱 오류 ({cik}): {e}")
+
     return holdings
 
-def get_13f_data():
-    headers = {'User-Agent': 'jungseunghun ilman2tv@gmail.com'}
-    
-    # 요청하신 새로운 구루/기관 라인업 반영
-    gurus = {
-        "버크셔 해서웨이 (워런 버핏)": "0001067983",
-        "스탠리 드러켄밀러 (Duquesne)": "0001568832",
-        "데이비드 테퍼 (Appaloosa)": "0000905567",
-        "Bridgewater (레이 달리오)": "0001350694",
-        "Coatue Management": "0001461573",
-        "Tiger Global": "0001456346"
-    }
-    
-    for name, cik in gurus.items():
-        print(f"🔄 {name} 데이터 수집 중...")
-        url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            data = response.json()
-            recent_docs = data['filings']['recent']
-            f_idx = [i for i, form in enumerate(recent_docs['form']) if form == '13F-HR']
-            
-            if not f_idx:
-                print(f"❌ {name}: 최근 13F-HR 공시를 찾을 수 없습니다.")
-                continue
-                
-            latest_i = f_idx[0]
-            filing_date = recent_docs['filingDate'][latest_i]
-            latest_acc = recent_docs['accessionNumber'][latest_i]
-            
-            current_holdings = get_holdings_from_sec(cik, latest_acc)
-            trades = []
-            
-            if len(f_idx) >= 2:
-                prev_i = f_idx[1]
-                prev_acc = recent_docs['accessionNumber'][prev_i]
-                prev_holdings = get_holdings_from_sec(cik, prev_acc)
-                
-                all_tickers = set(current_holdings.keys()) | set(prev_holdings.keys())
-                
-                for ticker in all_tickers:
-                    cur_shares = current_holdings.get(ticker, 0)
-                    prev_shares = prev_holdings.get(ticker, 0)
-                    
-                    if prev_shares == 0 and cur_shares > 0:
-                        trades.append({"ticker": ticker, "action": "신규진입 🔥", "shares": f"{cur_shares:,} 주", "change": "New", "sort_key": cur_shares})
-                    elif cur_shares == 0 and prev_shares > 0:
-                        trades.append({"ticker": ticker, "action": "전량매도 🔴", "shares": f"-{prev_shares:,} 주", "change": "-100%", "sort_key": prev_shares})
-                    elif cur_shares > prev_shares:
-                        diff = cur_shares - prev_shares
-                        pct = (diff / prev_shares) * 100
-                        trades.append({"ticker": ticker, "action": "매수 🟢", "shares": f"+{diff:,} 주", "change": f"+{pct:.1f}%", "sort_key": diff})
-                    elif cur_shares < prev_shares:
-                        diff = prev_shares - cur_shares
-                        pct = (diff / prev_shares) * 100
-                        trades.append({"ticker": ticker, "action": "매도 🔴", "shares": f"-{diff:,} 주", "change": f"-{pct:.1f}%", "sort_key": diff})
-                
-                # 변동량이 큰 주요 종목 상위 10개 정렬
-                trades = sorted(trades, key=lambda x: x['sort_key'], reverse=True)[:10]
-            else:
-                sorted_holdings = sorted(current_holdings.items(), key=lambda x: x[1], reverse=True)[:10]
-                for ticker, shares in sorted_holdings:
-                    trades.append({"ticker": ticker, "action": "보유 🪙", "shares": f"{shares:,} 주", "change": "보유중"})
-            
-            if trades:
-                send_to_discord(name, filing_date, trades)
-            
-            time.sleep(0.5)  # SEC 디도스 오해 방지 딜레이
-            
-        except Exception as e:
-            print(f"❌ {name} 처리 중 실패: {e}")
+# ====================== 한국식 금액 변환 ======================
+def format_korean_value(value_thousands: int) -> str:
+    if not value_thousands or value_thousands <= 0:
+        return "-"
+    dollars = value_thousands * 1000
+    if dollars >= 1_000_000_000_000:
+        return f"{dollars / 1_000_000_000_000:.2f}조"
+    elif dollars >= 100_000_000:
+        return f"{int(dollars / 100_000_000)}억"
+    else:
+        return f"{dollars / 1_000_000:.1f}백만"
 
-def send_to_discord(guru_name, date, trades):
-    if not DISCORD_URL:
-        print(f"⚠️ 디스코드 웹훅 URL이 설정되지 않아 {guru_name} 전송을 건너뜁니다.")
+# ====================== Discord 전송 (기관별 표) ======================
+def send_combined_discord_report(results):
+    if not DISCORD_URL or not results:
         return
 
-    try:
-        month = int(date.split('-')[1])
-        if 4 <= month <= 6: period = "1분기 (1월 ~ 3월)"
-        elif 7 <= month <= 9: period = "2분기 (4월 ~ 6월)"
-        elif 10 <= month <= 12: period = "3분기 (7월 ~ 9월)"
-        else: period = "4분기 (10월 ~ 12월)"
-    except:
-        period = "분기 데이터"
+    latest_date = max([r['filing_date'] for r in results], default="Unknown")
+    year = latest_date[:4]
+    month = int(latest_date[5:7])
+    quarter = {1:"1분기",2:"1분기",3:"1분기",4:"2분기",5:"2분기",6:"2분기",
+               7:"3분기",8:"3분기",9:"3분기",10:"4분기",11:"4분기",12:"4분기"}.get(month, "")
 
-    sell_list, buy_list, new_list = "", "", ""
+    fields = []
     
-    for t in trades:
-        line = f" ` {t['ticker']:<12} ` ｜ **{t['shares']}** `({t['change']})`\n"
+    for result in results:
+        guru_name = result['name']
+        trades = result['trades'][:8]
         
-        if "전량매도" in t['action'] or t['action'] == "매도 🔴": 
-            sell_list += f"📉 {line}"
-        elif "매수" in t['action']: 
-            buy_list += f"📈 {line}"
-        elif "신규" in t['action']: 
-            new_list += f"✨ {line}"
-        else: 
-            buy_list += f"🪙 {line}"
+        table = "| 티커   | 유형     | 변동내역                    | 금액      |\n"
+        table += "|--------|----------|-----------------------------|-----------|\n"
+        
+        for t in trades:
+            value_str = format_korean_value(t.get('value', 0))
             
-    sell_list = sell_list if sell_list else "❌ 이번 분기 주요 매도 내역 없음\n"
-    buy_list = buy_list if buy_list else "❌ 이번 분기 주요 매수 내역 없음\n"
-    new_list = new_list if new_list else "❌ 이번 분기 주요 신규 진입 없음\n"
-        
+            change = t['change']
+            if "-100%" in change:
+                type_str = "🔴 매도"
+                change_str = "전량매도"
+            elif "New" in change:
+                type_str = "✨ 신규"
+                change_str = "신규진입"
+            elif "+" in change or "매수" in str(t.get('action', '')):
+                type_str = "🟢 매수"
+                change_str = change
+            else:
+                type_str = "🔴 매도"
+                change_str = change
+
+            line = f"| `{t['ticker']:<5}` | {type_str} | {t['shares']} ({change_str}) | **{value_str}** |\n"
+            table += line
+
+        fields.append({
+            "name": f"🏛️ {guru_name}",
+            "value": f"```{table}```",
+            "inline": False
+        })
+
     payload = {
         "embeds": [{
-            "title": f"🏛️ {guru_name}",
-            "description": f"📊 **대상 기간:** {period}\n📅 **공시 확인일:** {date}\n──────────────────────────────",
-            "color": 15158332,  
-            "fields": [
-                {"name": "🔴 이번 분기 매도 (Decrease / Liquidated)", "value": sell_list, "inline": False},
-                {"name": "🟢 이번 분기 매수 (Increase)", "value": buy_list, "inline": False},
-                {"name": "🔥 이번 분기 신규 진입 (New Entry)", "value": new_list, "inline": False},
-                {"name": "──────────────────────────────", "value": "*🔗 본 알림은 인공지능 티커 변환 엔진이 적용되어 발송됩니다.*", "inline": False}
-            ]
+            "title": "🔔 13F 매크로 Guru 변동 알림",
+            "description": f"**{year}년 {quarter}** | 공시 기간: {latest_date}",
+            "color": 0x1E88E5,
+            "fields": fields,
+            "footer": {"text": "13F AI Parser v2.7 • 매크로 중심 Top 5"},
+            "timestamp": datetime.utcnow().isoformat()
         }]
     }
-    
+
     try:
         res = requests.post(DISCORD_URL, json=payload, timeout=10)
-        if res.status_code == 204:
-            print(f"✅ {guru_name} 디스코드 전송 완료!")
-        else:
-            print(f"⚠️ 디스코드 전송 실패 ({res.status_code}): {res.text}")
+        if res.status_code in (200, 204):
+            logging.info("✅ 기관별 표 알림 전송 완료")
     except Exception as e:
-        print(f"디스코드 전송 중 에러: {e}")
+        logging.error(f"Discord 전송 에러: {e}")
+
+# ====================== 메인 함수 ======================
+def get_13f_data():
+    # 매크로 중심 Top 5
+    gurus = {
+        "스탠리 드러켄밀러": "0001568832",
+        "데이비드 테퍼": "0000905567",
+        "폴 튜더 존스": "0000923093",
+        "레이 달리오 (Bridgewater)": "0001350694",
+        "빌 애크먼 (Pershing Square)": "0001336528",
+    }
+
+    all_results = []
+
+    for name, cik in gurus.items():
+        logging.info(f"🔄 {name} 데이터 수집 중...")
+        try:
+            url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
+            response = requests_get(url)
+            data = response.json()
+
+            recent = data['filings']['recent']
+            f_idx = [i for i, form in enumerate(recent['form']) if form == '13F-HR']
+
+            if not f_idx:
+                continue
+
+            latest_i = f_idx[0]
+            filing_date = recent['filingDate'][latest_i]
+            acc_num = recent['accessionNumber'][latest_i]
+
+            current = get_holdings_from_sec(cik, acc_num)
+            trades = []
+
+            if len(f_idx) >= 2:
+                prev = get_holdings_from_sec(cik, recent['accessionNumber'][f_idx[1]])
+                all_tickers = set(current.keys()) | set(prev.keys())
+
+                for ticker in all_tickers:
+                    cur = current.get(ticker, {"shares": 0, "value": 0})
+                    pre = prev.get(ticker, {"shares": 0, "value": 0})
+                    cur_s = cur["shares"]
+                    pre_s = pre["shares"]
+
+                    if pre_s == 0 and cur_s > 0:
+                        trades.append({
+                            "ticker": ticker,
+                            "action": "신규진입 🔥",
+                            "shares": f"{cur_s:,} 주",
+                            "change": "New",
+                            "value": cur["value"]
+                        })
+                    elif cur_s == 0 and pre_s > 0:
+                        trades.append({
+                            "ticker": ticker,
+                            "action": "전량매도 🔴",
+                            "shares": f"-{pre_s:,} 주",
+                            "change": "-100%",
+                            "value": pre["value"]
+                        })
+                    elif cur_s > pre_s:
+                        diff = cur_s - pre_s
+                        pct = (diff / pre_s) * 100
+                        trades.append({
+                            "ticker": ticker,
+                            "action": "매수 🟢",
+                            "shares": f"+{diff:,} 주",
+                            "change": f"+{pct:.1f}%",
+                            "value": cur["value"]
+                        })
+                    elif cur_s < pre_s:
+                        diff = pre_s - cur_s
+                        pct = (diff / pre_s) * 100
+                        trades.append({
+                            "ticker": ticker,
+                            "action": "매도 🔴",
+                            "shares": f"-{diff:,} 주",
+                            "change": f"-{pct:.1f}%",
+                            "value": cur["value"]
+                        })
+
+            # 변동량 기준 정렬
+            trades = sorted(trades, key=lambda x: abs(x.get('value', 0)), reverse=True)
+
+            if trades:
+                all_results.append({
+                    "name": name,
+                    "trades": trades,
+                    "filing_date": filing_date
+                })
+
+            time.sleep(0.8)  # SEC Rate Limit 방지
+
+        except Exception as e:
+            logging.error(f"{name} 처리 실패: {e}")
+
+    if all_results:
+        send_combined_discord_report(all_results)
+    else:
+        logging.warning("전송할 데이터가 없습니다.")
 
 if __name__ == "__main__":
     get_13f_data()
