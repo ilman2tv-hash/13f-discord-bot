@@ -20,7 +20,7 @@ LAST_SENT_FILE = "last_sent.json"
 
 
 # =========================
-# 저장 파일 관리
+# 마지막 전송 기록
 # =========================
 
 def load_last_sent():
@@ -60,13 +60,18 @@ def safe_text(elem):
         return ""
 
 
-def format_krw(usd_value_k):
+def format_krw(usd_value):
+    """
+    SEC XML value 기준 원화 변환
+    현재 출력이 1000배 크게 나왔기 때문에 1000 곱하지 않음
+    """
+
     try:
-        usd_value_k = int(usd_value_k or 0)
+        usd_value = int(usd_value or 0)
     except:
         return "0원"
 
-    krw = usd_value_k * 1000 * EXCHANGE_RATE
+    krw = usd_value * EXCHANGE_RATE
 
     if krw >= 1_000_000_000_000:
         cho = krw // 1_000_000_000_000
@@ -123,28 +128,17 @@ def get_holdings_from_sec(cik, accession_num):
             f"{int(cik)}/{acc_clean}/index.json"
         )
 
-        res = requests.get(
-            folder_url,
-            headers=HEADERS,
-            timeout=15
-        )
-
+        res = requests.get(folder_url, headers=HEADERS, timeout=15)
         res.raise_for_status()
 
-        files = (
-            res.json()
-            .get("directory", {})
-            .get("item", [])
-        )
+        files = res.json().get("directory", {}).get("item", [])
 
         xml_file = next(
             (
                 f.get("name", "")
                 for f in files
-                if (
-                    f.get("name", "").lower().endswith(".xml")
-                    and "table" in f.get("name", "").lower()
-                )
+                if f.get("name", "").lower().endswith(".xml")
+                and "table" in f.get("name", "").lower()
             ),
             None
         )
@@ -158,21 +152,12 @@ def get_holdings_from_sec(cik, accession_num):
             f"{int(cik)}/{acc_clean}/{xml_file}"
         )
 
-        xml_res = requests.get(
-            xml_url,
-            headers=HEADERS,
-            timeout=15
-        )
-
+        xml_res = requests.get(xml_url, headers=HEADERS, timeout=15)
         xml_res.raise_for_status()
 
         root = ET.fromstring(xml_res.content)
 
-        ns = (
-            {"ns": root.tag.split("}")[0].strip("{")}
-            if "}" in root.tag
-            else None
-        )
+        ns = {"ns": root.tag.split("}")[0].strip("{")} if "}" in root.tag else None
 
         info_tables = (
             root.findall(".//ns:infoTable", ns)
@@ -222,10 +207,15 @@ def send_to_discord(guru_name, filing_date, portfolio):
         return False
 
     if not portfolio:
-        print(f"{guru_name}: 전송할 포트폴리오 없음")
+        print(f"{guru_name}: 전송할 내용 없음")
         return False
 
-    lines = []
+    sections = {
+        "신규진입 🔥": [],
+        "비중확대 🟢": [],
+        "비중축소 🔴": [],
+        "유지 ➖": [],
+    }
 
     for p in portfolio:
         line = (
@@ -233,17 +223,26 @@ def send_to_discord(guru_name, filing_date, portfolio):
             f"{p['status']} ｜ "
             f"약 {p['amount_kr']}"
         )
-        lines.append(line)
+
+        sections[p["status"]].append(line)
+
+    fields = []
+
+    for title, lines in sections.items():
+        if lines:
+            fields.append({
+                "name": title,
+                "value": "\n".join(lines),
+                "inline": False
+            })
 
     payload = {
         "embeds": [
             {
                 "title": f"🏛️ {guru_name} TOP {TOP_N} 포트폴리오",
-                "description": (
-                    f"📅 SEC 13F 공시일: {filing_date}\n\n"
-                    + "\n".join(lines)
-                ),
+                "description": f"📅 SEC 13F 공시일: {filing_date}",
                 "color": 15158332,
+                "fields": fields,
                 "footer": {
                     "text": (
                         f"현재 보유 비중 기준 TOP {TOP_N} ｜ "
@@ -256,12 +255,7 @@ def send_to_discord(guru_name, filing_date, portfolio):
     }
 
     try:
-        res = requests.post(
-            DISCORD_URL,
-            json=payload,
-            timeout=10
-        )
-
+        res = requests.post(DISCORD_URL, json=payload, timeout=10)
         res.raise_for_status()
         print(f"디스코드 전송 완료: {guru_name}")
         return True
@@ -291,24 +285,12 @@ def get_13f_data():
         print(f"\n🔄 수집 중: {guru_name}")
 
         try:
-            url = (
-                f"https://data.sec.gov/submissions/"
-                f"CIK{cik.zfill(10)}.json"
-            )
+            url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
 
-            res = requests.get(
-                url,
-                headers=HEADERS,
-                timeout=15
-            )
-
+            res = requests.get(url, headers=HEADERS, timeout=15)
             res.raise_for_status()
 
-            recent = (
-                res.json()
-                .get("filings", {})
-                .get("recent", {})
-            )
+            recent = res.json().get("filings", {}).get("recent", {})
 
             forms = recent.get("form", [])
             accession_numbers = recent.get("accessionNumber", [])
@@ -320,7 +302,7 @@ def get_13f_data():
             ]
 
             if len(filing_indexes) < 2:
-                print(f"{guru_name}: 13F 부족")
+                print(f"{guru_name}: 비교할 13F 부족")
                 continue
 
             current_idx = filing_indexes[0]
@@ -328,7 +310,6 @@ def get_13f_data():
 
             current_accession = accession_numbers[current_idx]
 
-            # 이미 보낸 공시면 건너뜀
             if last_sent.get(cik) == current_accession:
                 print(f"{guru_name}: 새 공시 없음, 알림 생략")
                 continue
@@ -400,7 +381,6 @@ def get_13f_data():
                 portfolio
             )
 
-            # 디스코드 전송 성공했을 때만 저장
             if sent:
                 last_sent[cik] = current_accession
                 save_last_sent(last_sent)
