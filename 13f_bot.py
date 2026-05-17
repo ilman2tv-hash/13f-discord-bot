@@ -15,7 +15,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Ticker 캐시
 ticker_cache = {}
 
 # ====================== Helper Functions ======================
@@ -49,7 +48,7 @@ def convert_corporate_name(raw_name: str) -> str:
     name_map = {
         "APPLE INC": "AAPL", "NVIDIA CORP": "NVDA", "MICROSOFT CORP": "MSFT",
         "AMAZON COM INC": "AMZN", "ALPHABET INC": "GOOGL", "META PLATFORMS": "META",
-        "BERKSHIRE HATHAWAY": "BRK.B", "JPMORGAN CHASE": "JPM", "EXXON MOBIL": "XOM",
+        "BERKSHIRE HATHAWAY": "BRK.B",
     }
     upper = raw_name.upper().strip()
     for key, ticker in name_map.items():
@@ -70,7 +69,6 @@ def get_holdings_from_sec(cik: str, accession_num: str):
         xml_file = next((f['name'] for f in files if f['name'].endswith('.xml') and 'infotable' in f['name'].lower()), None)
         if not xml_file:
             xml_file = next((f['name'] for f in files if f['name'].endswith('.xml')), None)
-
         if not xml_file:
             return {}
 
@@ -78,6 +76,7 @@ def get_holdings_from_sec(cik: str, accession_num: str):
         xml_res = requests_get(xml_url)
         root = ET.fromstring(xml_res.content)
 
+        # ✅ 수정된 부분
         ns = {'ns': root.tag.split('}')[0].strip('{')}} if '}' in root.tag else {}
 
         info_tables = (root.findall('.//ns:infoTable', ns) or 
@@ -112,7 +111,7 @@ def get_holdings_from_sec(cik: str, accession_num: str):
 
     return holdings
 
-# ====================== 한국식 금액 변환 ======================
+# ====================== 한국식 금액 ======================
 def format_korean_value(value_thousands: int) -> str:
     if not value_thousands or value_thousands <= 0:
         return "-"
@@ -124,7 +123,7 @@ def format_korean_value(value_thousands: int) -> str:
     else:
         return f"{dollars / 1_000_000:.1f}백만"
 
-# ====================== Discord 전송 (기관별 표) ======================
+# ====================== Discord 전송 ======================
 def send_combined_discord_report(results):
     if not DISCORD_URL or not results:
         return
@@ -146,8 +145,8 @@ def send_combined_discord_report(results):
         
         for t in trades:
             value_str = format_korean_value(t.get('value', 0))
-            
             change = t['change']
+            
             if "-100%" in change:
                 type_str = "🔴 매도"
                 change_str = "전량매도"
@@ -176,7 +175,7 @@ def send_combined_discord_report(results):
             "description": f"**{year}년 {quarter}** | 공시 기간: {latest_date}",
             "color": 0x1E88E5,
             "fields": fields,
-            "footer": {"text": "13F AI Parser v2.7 • 매크로 중심 Top 5"},
+            "footer": {"text": "13F AI Parser v2.7 • 매크로 중심"},
             "timestamp": datetime.utcnow().isoformat()
         }]
     }
@@ -184,13 +183,12 @@ def send_combined_discord_report(results):
     try:
         res = requests.post(DISCORD_URL, json=payload, timeout=10)
         if res.status_code in (200, 204):
-            logging.info("✅ 기관별 표 알림 전송 완료")
+            logging.info("✅ 알림 전송 완료")
     except Exception as e:
         logging.error(f"Discord 전송 에러: {e}")
 
-# ====================== 메인 함수 ======================
+# ====================== 메인 ======================
 def get_13f_data():
-    # 매크로 중심 Top 5
     gurus = {
         "스탠리 드러켄밀러": "0001568832",
         "데이비드 테퍼": "0000905567",
@@ -222,7 +220,9 @@ def get_13f_data():
             trades = []
 
             if len(f_idx) >= 2:
-                prev = get_holdings_from_sec(cik, recent['accessionNumber'][f_idx[1]])
+                prev_acc = recent['accessionNumber'][f_idx[1]]
+                prev = get_holdings_from_sec(cik, prev_acc)
+
                 all_tickers = set(current.keys()) | set(prev.keys())
 
                 for ticker in all_tickers:
@@ -232,61 +232,29 @@ def get_13f_data():
                     pre_s = pre["shares"]
 
                     if pre_s == 0 and cur_s > 0:
-                        trades.append({
-                            "ticker": ticker,
-                            "action": "신규진입 🔥",
-                            "shares": f"{cur_s:,} 주",
-                            "change": "New",
-                            "value": cur["value"]
-                        })
+                        trades.append({"ticker": ticker, "shares": f"{cur_s:,} 주", "change": "New", "value": cur["value"]})
                     elif cur_s == 0 and pre_s > 0:
-                        trades.append({
-                            "ticker": ticker,
-                            "action": "전량매도 🔴",
-                            "shares": f"-{pre_s:,} 주",
-                            "change": "-100%",
-                            "value": pre["value"]
-                        })
+                        trades.append({"ticker": ticker, "shares": f"-{pre_s:,} 주", "change": "-100%", "value": pre["value"]})
                     elif cur_s > pre_s:
                         diff = cur_s - pre_s
                         pct = (diff / pre_s) * 100
-                        trades.append({
-                            "ticker": ticker,
-                            "action": "매수 🟢",
-                            "shares": f"+{diff:,} 주",
-                            "change": f"+{pct:.1f}%",
-                            "value": cur["value"]
-                        })
+                        trades.append({"ticker": ticker, "shares": f"+{diff:,} 주", "change": f"+{pct:.1f}%", "value": cur["value"]})
                     elif cur_s < pre_s:
                         diff = pre_s - cur_s
                         pct = (diff / pre_s) * 100
-                        trades.append({
-                            "ticker": ticker,
-                            "action": "매도 🔴",
-                            "shares": f"-{diff:,} 주",
-                            "change": f"-{pct:.1f}%",
-                            "value": cur["value"]
-                        })
+                        trades.append({"ticker": ticker, "shares": f"-{diff:,} 주", "change": f"-{pct:.1f}%", "value": cur["value"]})
 
-            # 변동량 기준 정렬
             trades = sorted(trades, key=lambda x: abs(x.get('value', 0)), reverse=True)
-
+            
             if trades:
-                all_results.append({
-                    "name": name,
-                    "trades": trades,
-                    "filing_date": filing_date
-                })
+                all_results.append({"name": name, "trades": trades, "filing_date": filing_date})
 
-            time.sleep(0.8)  # SEC Rate Limit 방지
+            time.sleep(0.8)
 
         except Exception as e:
             logging.error(f"{name} 처리 실패: {e}")
 
-    if all_results:
-        send_combined_discord_report(all_results)
-    else:
-        logging.warning("전송할 데이터가 없습니다.")
+    send_combined_discord_report(all_results)
 
 if __name__ == "__main__":
     get_13f_data()
