@@ -3,8 +3,9 @@ from collections import defaultdict
 import xml.etree.ElementTree as ET
 
 WEBHOOK_URL = os.environ.get("SEC_13F_WEBHOOK_URL")
-HEADERS = {"User-Agent": "ilman2tv@gmail.com"}
+HEADERS = {"User-Agent": "ilman2tv@gmail.com"} # 본인 이메일로 변경 필수
 STATE_FILE = "state_13f.json"
+COMPANY_LIST_FILE = "monitored_companies.json"
 EXCHANGE_RATE = 1350
 TOP_N = 10
 
@@ -34,7 +35,7 @@ def format_krw(usd):
         return f"{krw // 1_000_000_000_000}조 {(krw % 1_000_000_000_000) // 100_000_000}억"
     return f"{krw // 100_000_000}억"
 
-def get_ticker_from_cusip(cusip):
+def get_ticker_and_cik_from_cusip(cusip):
     try:
         res = requests.get(f"https://query1.finance.yahoo.com/v1/finance/search?q={cusip}", headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
         if res.status_code == 200 and res.json().get("quotes"):
@@ -68,6 +69,8 @@ def get_holdings(cik, acc_num):
 def process_13f():
     state = load_state()
     all_portfolios = {}
+    discovered_companies = {}
+    has_new_update = False # 새로운 공시가 하나라도 떴는지 확인하는 스위치
 
     for name, cik in GURUS.items():
         res = requests.get(f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json", headers=HEADERS)
@@ -81,8 +84,7 @@ def process_13f():
         pre_acc = recent["accessionNumber"][idx_13f[1]]
         date = recent["filingDate"][idx_13f[0]]
 
-        if state.get(cik) == cur_acc: continue # 이미 처리함
-
+        # 💡 [핵심] 알림 여부(상태)와 상관없이 일단 5명 전원의 최신 포트폴리오를 무조건 파싱합니다.
         cur_holdings = get_holdings(cik, cur_acc)
         pre_holdings = get_holdings(cik, pre_acc)
         
@@ -103,30 +105,39 @@ def process_13f():
 
         portfolio = sorted(portfolio, key=lambda x: x["value"], reverse=True)[:TOP_N]
         for p in portfolio:
-            p["ticker"] = get_ticker_from_cusip(p["cusip"]) or p["issuer"][:10]
-            time.sleep(0.5) # 야후 파이낸스 차단 방지
+            p["ticker"] = get_ticker_and_cik_from_cusip(p["cusip"]) or p["issuer"][:10]
+            if p["status"] in ["신규진입 🔥", "비중확대 🟢"]:
+                discovered_companies[p["ticker"]] = p["cusip"]
+            time.sleep(0.3)
 
+        # 5명의 데이터 바구니 완성
         if portfolio:
             all_portfolios[name] = portfolio
+
+        # 💡 [핵심] 만약 이번에 처음 본 '새로운' 공시라면? 개별 알림을 보내고 스위치를 켭니다.
+        if state.get(cik) != cur_acc and portfolio:
+            has_new_update = True
             
-            # 개별 구루 알림 전송
             fields = []
             for status_type in ["신규진입 🔥", "비중확대 🟢", "비중축소 🔴", "유지 ➖"]:
                 items = [f"`{p['ticker']}` ｜ {p['status']} ｜ 약 {p['krw']}" for p in portfolio if p["status"] == status_type]
                 if items: fields.append({"name": status_type, "value": "\n".join(items), "inline": False})
             
-            requests.post(WEBHOOK_URL, json={"embeds": [{
-                "title": f"🏛️ {name} TOP {TOP_N} 포트폴리오",
-                "description": f"📅 공시일: {date}",
-                "color": 15158332,
-                "fields": fields
-            }]})
-        
-        state[cik] = cur_acc
-        time.sleep(1) # SEC 차단 방지
+            if WEBHOOK_URL:
+                requests.post(WEBHOOK_URL, json={"embeds": [{
+                    "title": f"🏛️ {name} TOP {TOP_N} 포트폴리오",
+                    "description": f"📅 공시일: {date}",
+                    "color": 15158332,
+                    "fields": fields
+                }]})
+            state[cik] = cur_acc
 
-    # 컨센서스 전송
-    if all_portfolios:
+    # 💡 [핵심] 단 한 명이라도 새로운 공시가 떴다면, 5명 전체의 누적 데이터를 바탕으로 최종 요약을 쏩니다!
+    if has_new_update:
+        if discovered_companies:
+            with open(COMPANY_LIST_FILE, "w", encoding="utf-8") as f:
+                json.dump(discovered_companies, f, ensure_ascii=False, indent=2)
+
         buy_con, sell_con = defaultdict(list), defaultdict(list)
         for guru, port in all_portfolios.items():
             for s in port:
@@ -140,7 +151,13 @@ def process_13f():
             fields = []
             if hot_b: fields.append({"name": "🎯 동시에 담은 종목", "value": "\n".join([f"**{k}** ({len(v)}명): {', '.join(v)}" for k, v in hot_b.items()])})
             if hot_s: fields.append({"name": "🚨 동시에 줄인 종목", "value": "\n".join([f"**{k}** ({len(v)}명): {', '.join(v)}" for k, v in hot_s.items()])})
-            requests.post(WEBHOOK_URL, json={"embeds": [{"title": "📊 13F 최종 요약 (스마트머니 교집합)", "color": 3447003, "fields": fields}]})
+            
+            if WEBHOOK_URL:
+                requests.post(WEBHOOK_URL, json={"embeds": [{
+                    "title": f"📊 13F 최종 누적 요약 (현재 {len(all_portfolios)}명 데이터 기준)",
+                    "color": 3447003,
+                    "fields": fields
+                }]})
     
     save_state(state)
 
