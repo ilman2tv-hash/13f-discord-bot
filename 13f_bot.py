@@ -3,11 +3,14 @@ from collections import defaultdict
 import xml.etree.ElementTree as ET
 
 WEBHOOK_URL = os.environ.get("SEC_13F_WEBHOOK_URL")
-HEADERS = {"User-Agent": "ilman2tv@gmail.com"} # 본인 이메일로 변경 필수
+HEADERS = {"User-Agent": "ilman2tv@gmail.com"} # ⚠️ 본인 이메일로 반드시 변경
 STATE_FILE = "state_13f.json"
 COMPANY_LIST_FILE = "monitored_companies.json"
 EXCHANGE_RATE = 1350
 TOP_N = 10
+
+# 수동으로 'Run workflow' 버튼을 눌렀는지 감지
+IS_MANUAL_RUN = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
 
 GURUS = {
     "워런 버핏 (Berkshire)": "0001067983",
@@ -68,11 +71,11 @@ def get_holdings(cik, acc_num):
 
 def process_13f():
     state = load_state()
-    all_portfolios = {}
-    discovered_companies = {}
-    has_new_update = False # 새로운 공시가 하나라도 떴는지 확인하는 스위치
+    guru_filings = []
 
+    # 1. 5명 전원의 최신 공시 날짜 및 분기 기준일(reportDate) 수집
     for name, cik in GURUS.items():
+        time.sleep(1) 
         res = requests.get(f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json", headers=HEADERS)
         if res.status_code != 200: continue
         
@@ -83,8 +86,38 @@ def process_13f():
         cur_acc = recent["accessionNumber"][idx_13f[0]]
         pre_acc = recent["accessionNumber"][idx_13f[1]]
         date = recent["filingDate"][idx_13f[0]]
+        
+        # 💡 [핵심] 분기 기준일(reportDate)을 추출하여 지난 분기와 이번 분기를 완벽하게 구분
+        report_dates = recent.get("reportDate", [])
+        report_date = report_dates[idx_13f[0]] if report_dates else date[:7]
 
-        # 💡 [핵심] 알림 여부(상태)와 상관없이 일단 5명 전원의 최신 포트폴리오를 무조건 파싱합니다.
+        guru_filings.append({
+            "name": name, "cik": cik, "cur_acc": cur_acc, "pre_acc": pre_acc,
+            "date": date, "report_date": report_date
+        })
+
+    if not guru_filings: return
+
+    # 2. 이번 '새로운 분기(시즌)' 판별
+    latest_report_date = max(f["report_date"] for f in guru_filings)
+    
+    # 3. 과거 분기에 머물러 있는 사람은 버리고, 최신 분기에 진입한 사람만 필터링
+    current_season_filings = [f for f in guru_filings if f["report_date"] == latest_report_date]
+
+    # 4. 이번 분기 공시 중 새로운 업데이트가 있거나 수동 실행인지 확인
+    any_new = any(state.get(f["cik"]) != f["cur_acc"] for f in current_season_filings)
+    
+    # 알림 보낼 게 없고 수동 실행도 아니면 조용히 종료
+    if not any_new and not IS_MANUAL_RUN:
+        return 
+
+    all_portfolios = {}
+    discovered_companies = {}
+
+    # 5. 최신 분기 진입자들만 데이터 파싱 및 개별 알림 전송
+    for filing in current_season_filings:
+        cik, name, cur_acc, pre_acc, date = filing["cik"], filing["name"], filing["cur_acc"], filing["pre_acc"], filing["date"]
+        
         cur_holdings = get_holdings(cik, cur_acc)
         pre_holdings = get_holdings(cik, pre_acc)
         
@@ -108,16 +141,13 @@ def process_13f():
             p["ticker"] = get_ticker_and_cik_from_cusip(p["cusip"]) or p["issuer"][:10]
             if p["status"] in ["신규진입 🔥", "비중확대 🟢"]:
                 discovered_companies[p["ticker"]] = p["cusip"]
-            time.sleep(0.3)
+            time.sleep(0.5)
 
-        # 5명의 데이터 바구니 완성
         if portfolio:
             all_portfolios[name] = portfolio
 
-        # 💡 [핵심] 만약 이번에 처음 본 '새로운' 공시라면? 개별 알림을 보내고 스위치를 켭니다.
-        if state.get(cik) != cur_acc and portfolio:
-            has_new_update = True
-            
+        # 개별 알림은 '아직 안 보낸 새로운 공시'이거나 '수동조회'일 때만 전송
+        if state.get(cik) != cur_acc or IS_MANUAL_RUN:
             fields = []
             for status_type in ["신규진입 🔥", "비중확대 🟢", "비중축소 🔴", "유지 ➖"]:
                 items = [f"`{p['ticker']}` ｜ {p['status']} ｜ 약 {p['krw']}" for p in portfolio if p["status"] == status_type]
@@ -130,34 +160,38 @@ def process_13f():
                     "color": 15158332,
                     "fields": fields
                 }]})
+                time.sleep(3) 
+                
             state[cik] = cur_acc
 
-    # 💡 [핵심] 단 한 명이라도 새로운 공시가 떴다면, 5명 전체의 누적 데이터를 바탕으로 최종 요약을 쏩니다!
-    if has_new_update:
-        if discovered_companies:
-            with open(COMPANY_LIST_FILE, "w", encoding="utf-8") as f:
-                json.dump(discovered_companies, f, ensure_ascii=False, indent=2)
+    # 6. 시즌제 요약본 전송 (이번 분기 제출자들만 모아서)
+    if discovered_companies:
+        with open(COMPANY_LIST_FILE, "w", encoding="utf-8") as f:
+            json.dump(discovered_companies, f, ensure_ascii=False, indent=2)
 
-        buy_con, sell_con = defaultdict(list), defaultdict(list)
-        for guru, port in all_portfolios.items():
-            for s in port:
-                if s["status"] in ["신규진입 🔥", "비중확대 🟢"]: buy_con[s["ticker"]].append(guru.split()[0])
-                elif s["status"] in ["비중축소 🔴", "전량매도 ❌"]: sell_con[s["ticker"]].append(guru.split()[0])
+    buy_con, sell_con = defaultdict(list), defaultdict(list)
+    for guru, port in all_portfolios.items():
+        for s in port:
+            if s["status"] in ["신규진입 🔥", "비중확대 🟢"]: buy_con[s["ticker"]].append(guru.split()[0])
+            elif s["status"] in ["비중축소 🔴", "전량매도 ❌"]: sell_con[s["ticker"]].append(guru.split()[0])
 
-        hot_b = {k: v for k, v in buy_con.items() if len(v) >= 2}
-        hot_s = {k: v for k, v in sell_con.items() if len(v) >= 2}
+    hot_b = {k: v for k, v in buy_con.items() if len(v) >= 2}
+    hot_s = {k: v for k, v in sell_con.items() if len(v) >= 2}
 
-        if hot_b or hot_s:
-            fields = []
-            if hot_b: fields.append({"name": "🎯 동시에 담은 종목", "value": "\n".join([f"**{k}** ({len(v)}명): {', '.join(v)}" for k, v in hot_b.items()])})
-            if hot_s: fields.append({"name": "🚨 동시에 줄인 종목", "value": "\n".join([f"**{k}** ({len(v)}명): {', '.join(v)}" for k, v in hot_s.items()])})
-            
-            if WEBHOOK_URL:
-                requests.post(WEBHOOK_URL, json={"embeds": [{
-                    "title": f"📊 13F 최종 누적 요약 (현재 {len(all_portfolios)}명 데이터 기준)",
-                    "color": 3447003,
-                    "fields": fields
-                }]})
+    fields = []
+    if hot_b: fields.append({"name": "🎯 동시에 담은 종목", "value": "\n".join([f"**{k}** ({len(v)}명): {', '.join(v)}" for k, v in hot_b.items()])})
+    if hot_s: fields.append({"name": "🚨 동시에 줄인 종목", "value": "\n".join([f"**{k}** ({len(v)}명): {', '.join(v)}" for k, v in hot_s.items()])})
+    
+    if not hot_b and not hot_s:
+        fields.append({"name": "👀 겹친 종목 없음", "value": "이번 분기 제출자 중에는 2명 이상 동시에 매수/매도한 종목이 없습니다.", "inline": False})
+    
+    if WEBHOOK_URL:
+        title_prefix = "[수동조회 전체보기] " if IS_MANUAL_RUN else ""
+        requests.post(WEBHOOK_URL, json={"embeds": [{
+            "title": f"{title_prefix}📊 13F 이번 시즌 누적 요약 ({len(all_portfolios)}명 제출 완료)",
+            "color": 3447003,
+            "fields": fields
+        }]})
     
     save_state(state)
 
