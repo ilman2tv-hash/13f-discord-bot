@@ -9,7 +9,6 @@ COMPANY_LIST_FILE = "monitored_companies.json"
 EXCHANGE_RATE = 1350
 TOP_N = 10
 
-# 수동으로 'Run workflow' 버튼을 눌렀는지 감지
 IS_MANUAL_RUN = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
 
 GURUS = {
@@ -51,21 +50,35 @@ def get_holdings(cik, acc_num):
     try:
         acc_clean = acc_num.replace("-", "")
         res = requests.get(f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/index.json", headers=HEADERS)
+        if res.status_code != 200: return holdings
+        
         files = res.json().get("directory", {}).get("item", [])
-        xml_file = next((f["name"] for f in files if f["name"].endswith(".xml") and "table" in f["name"].lower()), None)
+        
+        # 💡 [핵심수정] 파일명이 달라도 강제로 표(infoTable) XML 찾아내기
+        xml_files = [f["name"] for f in files if f["name"].endswith(".xml")]
+        xml_file = next((x for x in xml_files if "table" in x.lower() or "info" in x.lower()), None)
+        if not xml_file and xml_files:
+            xml_file = max(xml_files, key=lambda f: next((item["size"] for item in files if item["name"] == f), 0))
+            
         if not xml_file: return holdings
 
         xml_res = requests.get(f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{xml_file}", headers=HEADERS)
         root = ET.fromstring(xml_res.content)
-        ns = {"ns": root.tag.split("}")[0].strip("{")} if "}" in root.tag else None
         
-        info_tables = root.findall(".//ns:infoTable", ns) if ns else root.findall(".//infoTable")
-        for info in info_tables:
-            issuer = info.find(".//ns:nameOfIssuer", ns).text.strip() if ns else info.find(".//nameOfIssuer").text.strip()
-            cusip = info.find(".//ns:cusip", ns).text.strip() if ns else info.find(".//cusip").text.strip()
-            val = info.find(".//ns:value", ns).text.strip() if ns else info.find(".//value").text.strip()
-            shares = info.find(".//ns:sshPrnamt", ns).text.strip() if ns else info.find(".//sshPrnamt").text.strip()
-            if cusip: holdings[cusip] = {"issuer": issuer, "cusip": cusip, "value": safe_int(val), "shares": safe_int(shares)}
+        # 💡 [핵심수정] 펀드마다 다른 양식(네임스페이스)을 씹어먹는 우회 탐색 로직
+        for info in root.iter():
+            if 'infoTable' in info.tag:
+                issuer = next((c.text for c in info if 'nameOfIssuer' in c.tag), "")
+                cusip = next((c.text for c in info if 'cusip' in c.tag), "")
+                
+                val_elem = next((c for c in info if 'value' in c.tag), None)
+                val = val_elem.text if val_elem is not None else "0"
+                
+                shares_elem = next((c for c in info.iter() if 'sshPrnamt' in c.tag), None)
+                shares = shares_elem.text if shares_elem is not None else "0"
+                
+                if cusip and issuer:
+                    holdings[cusip] = {"issuer": issuer.strip(), "cusip": cusip.strip(), "value": safe_int(val), "shares": safe_int(shares)}
     except: pass
     return holdings
 
@@ -73,7 +86,6 @@ def process_13f():
     state = load_state()
     guru_filings = []
 
-    # 1. 5명 전원의 최신 공시 날짜 및 분기 기준일(reportDate) 수집
     for name, cik in GURUS.items():
         time.sleep(1) 
         res = requests.get(f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json", headers=HEADERS)
@@ -87,7 +99,6 @@ def process_13f():
         pre_acc = recent["accessionNumber"][idx_13f[1]]
         date = recent["filingDate"][idx_13f[0]]
         
-        # 💡 [핵심] 분기 기준일(reportDate)을 추출하여 지난 분기와 이번 분기를 완벽하게 구분
         report_dates = recent.get("reportDate", [])
         report_date = report_dates[idx_13f[0]] if report_dates else date[:7]
 
@@ -98,23 +109,15 @@ def process_13f():
 
     if not guru_filings: return
 
-    # 2. 이번 '새로운 분기(시즌)' 판별
     latest_report_date = max(f["report_date"] for f in guru_filings)
-    
-    # 3. 과거 분기에 머물러 있는 사람은 버리고, 최신 분기에 진입한 사람만 필터링
     current_season_filings = [f for f in guru_filings if f["report_date"] == latest_report_date]
-
-    # 4. 이번 분기 공시 중 새로운 업데이트가 있거나 수동 실행인지 확인
     any_new = any(state.get(f["cik"]) != f["cur_acc"] for f in current_season_filings)
     
-    # 알림 보낼 게 없고 수동 실행도 아니면 조용히 종료
-    if not any_new and not IS_MANUAL_RUN:
-        return 
+    if not any_new and not IS_MANUAL_RUN: return 
 
     all_portfolios = {}
     discovered_companies = {}
 
-    # 5. 최신 분기 진입자들만 데이터 파싱 및 개별 알림 전송
     for filing in current_season_filings:
         cik, name, cur_acc, pre_acc, date = filing["cik"], filing["name"], filing["cur_acc"], filing["pre_acc"], filing["date"]
         
@@ -146,8 +149,8 @@ def process_13f():
         if portfolio:
             all_portfolios[name] = portfolio
 
-        # 개별 알림은 '아직 안 보낸 새로운 공시'이거나 '수동조회'일 때만 전송
-        if state.get(cik) != cur_acc or IS_MANUAL_RUN:
+        # 💡 [핵심수정] 데이터(portfolio)가 텅 비었을 때는 절대 보내지 않도록 방어 로직 복구
+        if (state.get(cik) != cur_acc or IS_MANUAL_RUN) and portfolio:
             fields = []
             for status_type in ["신규진입 🔥", "비중확대 🟢", "비중축소 🔴", "유지 ➖"]:
                 items = [f"`{p['ticker']}` ｜ {p['status']} ｜ 약 {p['krw']}" for p in portfolio if p["status"] == status_type]
@@ -164,7 +167,6 @@ def process_13f():
                 
             state[cik] = cur_acc
 
-    # 6. 시즌제 요약본 전송 (이번 분기 제출자들만 모아서)
     if discovered_companies:
         with open(COMPANY_LIST_FILE, "w", encoding="utf-8") as f:
             json.dump(discovered_companies, f, ensure_ascii=False, indent=2)
