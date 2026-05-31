@@ -3,12 +3,15 @@ name: SEC 자동 알리미 봇
 on:
   workflow_dispatch:
   schedule:
-    # 한국 시간 기준 매일 오전 8시(장 마감 후)와 오후 6시(장 시작 전)에 2번씩 실행
+    # 한국 시간 기준 매일 오전 8시(장 마감 후)와 오후 6시(장 시작 전)에 실행
     - cron: '0 23,9 * * 1-5' 
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 깃허브에 파일을 저장할 수 있는 권한 부여
+
     steps:
       - name: 코드 체크아웃
         uses: actions/checkout@v3
@@ -21,7 +24,7 @@ jobs:
       - name: 필수 라이브러리 설치
         run: pip install requests
 
-      - name: 13F 운용보고서 봇 실행
+      - name: 13F 운용보고서 봇 실행 (명단 생성)
         env:
           SEC_13F_WEBHOOK_URL: ${{ secrets.SEC_13F_WEBHOOK_URL }}
         run: python 13f_bot.py
@@ -35,3 +38,11 @@ jobs:
         env:
           SEC_FORM4_WEBHOOK_URL: ${{ secrets.SEC_FORM4_WEBHOOK_URL }}
         run: python form4_bot.py
+
+      # 💡 핵심 추가 부분: 봇이 만들어낸 .json 파일들을 깃허브에 자동 저장
+      - name: 변경된 상태 및 명단 파일 저장 (Git Commit & Push)
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add *.json
+          git diff-index --quiet HEAD || (git commit -m "🔄 자동 업데이트: 공시 감지 내역 및 명단 저장" && git push)
