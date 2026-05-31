@@ -1,15 +1,10 @@
-name: 13F 공시 알리미 봇
+name: SEC 자동 알리미 봇
 
-# 💡 어떤 조건에서 이 봇을 실행할지 설정하는 부분입니다.
 on:
-  # 1. 내가 원할 때 언제든 수동으로 실행 가능 (기존 기능)
   workflow_dispatch:
-
-  # 2. 자동으로 실행되는 스케줄러 추가 (여기가 핵심!)
   schedule:
-    # ⚠️ 깃허브 시간은 세계 표준시(UTC) 기준이라 한국 시간보다 9시간 느립니다.
-    # 아래 설정은 한국 시간으로 [매주 토요일 오전 9시 00분]에 알아서 켜지라는 뜻입니다.
-    - cron: '0 0 * * 6'
+    # 한국 시간 기준 매일 오전 8시(장 마감 후)와 오후 6시(장 시작 전)에 2번씩 실행
+    - cron: '0 23,9 * * 1-5' 
 
 jobs:
   build:
@@ -23,10 +18,20 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 필수 프로그램 설치
+      - name: 필수 라이브러리 설치
         run: pip install requests
 
-      - name: 봇 실행
+      - name: 13F 운용보고서 봇 실행
         env:
           SEC_13F_WEBHOOK_URL: ${{ secrets.SEC_13F_WEBHOOK_URL }}
         run: python 13f_bot.py
+
+      - name: 대주주/8-K 공시 봇 실행
+        env:
+          SEC_OWNERSHIP_WEBHOOK_URL: ${{ secrets.SEC_OWNERSHIP_WEBHOOK_URL }}
+        run: python ownership_bot.py
+
+      - name: 내부자 거래 봇 실행
+        env:
+          SEC_FORM4_WEBHOOK_URL: ${{ secrets.SEC_FORM4_WEBHOOK_URL }}
+        run: python form4_bot.py
