@@ -2,7 +2,7 @@ import os, json, requests
 import xml.etree.ElementTree as ET
 
 WEBHOOK_URL = os.environ.get("SEC_FORM4_WEBHOOK_URL")
-HEADERS = {"User-Agent": "ilman2tv@gmail.com"}
+HEADERS = {"User-Agent": "your_email@example.com"}
 STATE_FILE = "state_form4.json"
 
 TARGET_COMPANIES = {
@@ -19,15 +19,11 @@ def load_state():
 def save_state(state):
     with open(STATE_FILE, "w") as f: json.dump(state, f)
 
-def send_discord(embed):
-    if WEBHOOK_URL: requests.post(WEBHOOK_URL, json={"embeds": [embed]})
-
 def run():
     state = load_state()
 
     for name, cik in TARGET_COMPANIES.items():
-        url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
-        res = requests.get(url, headers=HEADERS)
+        res = requests.get(f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json", headers=HEADERS)
         if res.status_code != 200: continue
         
         recent = res.json().get("filings", {}).get("recent", {})
@@ -45,39 +41,42 @@ def run():
                     root = ET.fromstring(xml_res.content)
                     
                     owner_name = root.findtext(".//rptOwnerName") or "Unknown"
-                    is_ceo = root.findtext(".//isOfficer") == "1"
-                    title = root.findtext(".//officerTitle") or "내부자"
+                    title = root.findtext(".//officerTitle") or "내부자/임원"
                     
-                    total_buy = 0
+                    total_amount = 0
                     total_shares = 0
+                    action_type = ""
+                    
                     for trans in root.findall(".//nonDerivativeTransaction"):
-                        if trans.findtext(".//transactionCode") == "P": # 장내 순매수 필터!
+                        t_code = trans.findtext(".//transactionCode")
+                        if t_code in ["P", "S"]: # P: 장내매수, S: 장내매도
                             shares = float(trans.findtext(".//transactionShares/value") or 0)
                             price = float(trans.findtext(".//transactionPricePerShare/value") or 0)
-                            total_buy += (shares * price)
+                            total_amount += (shares * price)
                             total_shares += shares
+                            action_type = "순매수 🔥" if t_code == "P" else "순매도 📉"
 
-                    # 필터 조건: 매수 금액 10만 달러 이상
-                    if total_buy >= 100000:
+                    # 10만 달러(약 1.3억) 이상일 경우에만 알림
+                    if total_amount >= 100000:
                         link = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{accession}-index.htm"
                         embed = {
-                            "title": "👔 내부자 거래: 강력 순매수 🔥",
-                            "color": 3066993,
+                            "title": f"👔 내부자 거래: 강력 {action_type}",
+                            "color": 3066993 if "매수" in action_type else 15158332, # 매수 초록, 매도 빨강
                             "fields": [
                                 {"name": "기업", "value": name, "inline": True},
                                 {"name": "보고자", "value": f"{owner_name} ({title})", "inline": True},
-                                {"name": "매수 금액", "value": f"${total_buy:,.0f}", "inline": False},
-                                {"name": "매수 수량", "value": f"{total_shares:,.0f}주", "inline": True},
+                                {"name": f"총 {action_type[:3]} 금액", "value": f"${total_amount:,.0f} (약 {int((total_amount*1350)/100000000)}억)", "inline": False},
+                                {"name": "수량", "value": f"{total_shares:,.0f}주", "inline": True},
                                 {"name": "상세보기", "value": f"[링크]({link})", "inline": False}
                             ]
                         }
-                        send_discord(embed)
+                        if WEBHOOK_URL: requests.post(WEBHOOK_URL, json={"embeds": [embed]})
                         
                 except Exception as e:
-                    print(f"Error parsing XML: {e}")
+                    print(f"Form4 에러: {e}")
                 
                 state[cik] = accession
-                break # 최신 1개만 처리
+                break
 
     save_state(state)
 
