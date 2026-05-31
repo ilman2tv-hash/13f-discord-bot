@@ -53,8 +53,6 @@ def get_holdings(cik, acc_num):
         if res.status_code != 200: return holdings
         
         files = res.json().get("directory", {}).get("item", [])
-        
-        # 💡 [핵심수정] 파일명이 달라도 강제로 표(infoTable) XML 찾아내기
         xml_files = [f["name"] for f in files if f["name"].endswith(".xml")]
         xml_file = next((x for x in xml_files if "table" in x.lower() or "info" in x.lower()), None)
         if not xml_file and xml_files:
@@ -65,20 +63,20 @@ def get_holdings(cik, acc_num):
         xml_res = requests.get(f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{xml_file}", headers=HEADERS)
         root = ET.fromstring(xml_res.content)
         
-        # 💡 [핵심수정] 펀드마다 다른 양식(네임스페이스)을 씹어먹는 우회 탐색 로직
+        # 💡 대소문자/네임스페이스 완전 무시 탐색 (구형 양식 완벽 대응)
         for info in root.iter():
-            if 'infoTable' in info.tag:
-                issuer = next((c.text for c in info if 'nameOfIssuer' in c.tag), "")
-                cusip = next((c.text for c in info if 'cusip' in c.tag), "")
+            if info.tag.lower().endswith('infotable'):
+                issuer = next((c.text for c in info.iter() if c.tag.lower().endswith('nameofissuer')), "")
+                cusip = next((c.text for c in info.iter() if c.tag.lower().endswith('cusip')), "")
                 
-                val_elem = next((c for c in info if 'value' in c.tag), None)
+                val_elem = next((c for c in info.iter() if c.tag.lower().endswith('value')), None)
                 val = val_elem.text if val_elem is not None else "0"
                 
-                shares_elem = next((c for c in info.iter() if 'sshPrnamt' in c.tag), None)
+                shares_elem = next((c for c in info.iter() if c.tag.lower().endswith('sshprnamt')), None)
                 shares = shares_elem.text if shares_elem is not None else "0"
                 
                 if cusip and issuer:
-                    holdings[cusip] = {"issuer": issuer.strip(), "cusip": cusip.strip(), "value": safe_int(val), "shares": safe_int(shares)}
+                    holdings[cusip.strip()] = {"issuer": issuer.strip(), "cusip": cusip.strip(), "value": safe_int(val), "shares": safe_int(shares)}
     except: pass
     return holdings
 
@@ -86,21 +84,45 @@ def process_13f():
     state = load_state()
     guru_filings = []
 
+    # 💡 1000개 제한에 밀린 서류까지 싹 다 긁어오는 무적 로직
+    def get_13f_filings(cik):
+        filings = []
+        res = requests.get(f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json", headers=HEADERS)
+        if res.status_code != 200: return filings
+        
+        data = res.json()
+        
+        def extract_13f(filing_data):
+            dates = filing_data.get("filingDate", [])
+            forms = filing_data.get("form", [])
+            accs = filing_data.get("accessionNumber", [])
+            report_dates = filing_data.get("reportDate", [])
+            
+            for i, form in enumerate(forms):
+                if "13F-HR" in form:
+                    rd = report_dates[i] if report_dates and i < len(report_dates) else dates[i][:7]
+                    filings.append({"acc": accs[i], "date": dates[i], "report_date": rd})
+                    
+        extract_13f(data.get("filings", {}).get("recent", {}))
+        
+        # 서류가 2개(현재/이전) 미만이면, 과거 저장소까지 강제로 열어서 뒤짐
+        if len(filings) < 2:
+            for old_file in data.get("filings", {}).get("files", []):
+                if len(filings) >= 2: break
+                time.sleep(0.5)
+                old_res = requests.get(f"https://data.sec.gov/submissions/{old_file['name']}", headers=HEADERS)
+                if old_res.status_code == 200:
+                    extract_13f(old_res.json())
+                    
+        return filings[:2]
+
     for name, cik in GURUS.items():
         time.sleep(1) 
-        res = requests.get(f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json", headers=HEADERS)
-        if res.status_code != 200: continue
+        filings = get_13f_filings(cik)
+        if len(filings) < 2: continue
         
-        recent = res.json().get("filings", {}).get("recent", {})
-        idx_13f = [i for i, f in enumerate(recent.get("form", [])) if f == "13F-HR"]
-        if len(idx_13f) < 2: continue
-
-        cur_acc = recent["accessionNumber"][idx_13f[0]]
-        pre_acc = recent["accessionNumber"][idx_13f[1]]
-        date = recent["filingDate"][idx_13f[0]]
-        
-        report_dates = recent.get("reportDate", [])
-        report_date = report_dates[idx_13f[0]] if report_dates else date[:7]
+        cur_acc, pre_acc = filings[0]["acc"], filings[1]["acc"]
+        date, report_date = filings[0]["date"], filings[0]["report_date"]
 
         guru_filings.append({
             "name": name, "cik": cik, "cur_acc": cur_acc, "pre_acc": pre_acc,
@@ -149,7 +171,6 @@ def process_13f():
         if portfolio:
             all_portfolios[name] = portfolio
 
-        # 💡 [핵심수정] 데이터(portfolio)가 텅 비었을 때는 절대 보내지 않도록 방어 로직 복구
         if (state.get(cik) != cur_acc or IS_MANUAL_RUN) and portfolio:
             fields = []
             for status_type in ["신규진입 🔥", "비중확대 🟢", "비중축소 🔴", "유지 ➖"]:
