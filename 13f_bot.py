@@ -3,7 +3,7 @@ from collections import defaultdict
 import xml.etree.ElementTree as ET
 
 WEBHOOK_URL = os.environ.get("SEC_13F_WEBHOOK_URL")
-HEADERS = {"User-Agent": "your_email@example.com"} # 본인 이메일로 수정 권장
+HEADERS = {"User-Agent": "ilman2tv@gmail.com"} # 본인 이메일로 수정 권장
 STATE_FILE = "state_13f.json"
 
 # 타겟 구루 명단
