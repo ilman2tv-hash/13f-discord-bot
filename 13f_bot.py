@@ -3,7 +3,7 @@ from collections import defaultdict
 import xml.etree.ElementTree as ET
 
 WEBHOOK_URL = os.environ.get("SEC_13F_WEBHOOK_URL")
-HEADERS = {"User-Agent": "your_email@example.com"}
+HEADERS = {"User-Agent": "ilman2tv@gmail.com"}
 STATE_FILE = "state_13f.json"
 EXCHANGE_RATE = 1350
 TOP_N = 10
