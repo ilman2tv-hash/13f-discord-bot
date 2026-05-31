@@ -2,7 +2,7 @@ import os, json, requests
 import xml.etree.ElementTree as ET
 
 WEBHOOK_URL = os.environ.get("SEC_FORM4_WEBHOOK_URL")
-HEADERS = {"User-Agent": "your_email@example.com"}
+HEADERS = {"User-Agent": "ilman2tv@gmail.com"}
 STATE_FILE = "state_form4.json"
 
 TARGET_COMPANIES = {
