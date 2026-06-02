@@ -1,126 +1,185 @@
-import os, json, requests
+import os
+import json
+import time
+import requests
+import feedparser
 import xml.etree.ElementTree as ET
 
 WEBHOOK_URL = os.environ.get("SEC_FORM4_WEBHOOK_URL")
-HEADERS = {"User-Agent": "ilman2tv@gmail.com"} # 본인 이메일 입력
+
+# 주의: 아래 이메일 주소를 반드시 본인의 실제 이메일로 수정하세요.
+HEADERS = {
+    "User-Agent": "Form4Scanner/1.0 (ilman2tv@gmail.com)"
+}
+
 STATE_FILE = "state_form4.json"
-COMPANY_LIST_FILE = "monitored_companies.json"
+FORM4_FEED = (
+    "https://www.sec.gov/cgi-bin/browse-edgar"
+    "?action=getcurrent&type=4&count=100&output=atom"
+)
 
 def load_state():
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f: return json.load(f)
-    return {}
-
-def load_target_companies():
-    if os.path.exists(COMPANY_LIST_FILE):
-        with open(COMPANY_LIST_FILE, "r", encoding="utf-8") as f:
+        with open(STATE_FILE, "r") as f:
             return json.load(f)
-    return {"AAPL": "0000320193"}
+    return {"processed": []}
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
 
 def is_target_role(root):
-    """CEO, CFO, Chairman, Director 등 핵심 내부자인지 확인"""
-    if root.findtext(".//isDirector") == "1": return True, "Director"
-    
+    if root.findtext(".//isDirector") == "1":
+        return True, "Director"
+
     title = root.findtext(".//officerTitle")
     if title:
-        t_upper = title.upper()
-        if "CEO" in t_upper or "CHIEF EXECUTIVE" in t_upper: return True, "CEO"
-        if "CFO" in t_upper or "FINANCIAL" in t_upper: return True, "CFO"
-        if "CHAIRMAN" in t_upper: return True, "Chairman"
-        
+        t = title.upper()
+        if "CEO" in t or "CHIEF EXECUTIVE" in t:
+            return True, "CEO"
+        if "CFO" in t or "CHIEF FINANCIAL" in t:
+            return True, "CFO"
+        if "CHAIRMAN" in t:
+            return True, "Chairman"
+        if "FOUNDER" in t:
+            return True, "Founder"
+        if "PRESIDENT" in t:
+            return True, "President"
+
     return False, "Other"
+
+def send_discord(ticker, role_name, krw_text, increase_pct, filing_url):
+    embed = {
+        "title": f"💰 {role_name} 자사주 매수",
+        "color": 3066993,
+        "description": (
+            f"**종목:** {ticker}\n\n"
+            f"**매수금액:**\n약 {krw_text}\n\n"
+            f"**보유량 증가:**\n+{increase_pct:.1f}%\n\n"
+            f"[SEC 원문 확인]({filing_url})"
+        )
+    }
+
+    if WEBHOOK_URL:
+        requests.post(
+            WEBHOOK_URL,
+            json={"embeds": [embed]},
+            timeout=30
+        )
 
 def run():
     state = load_state()
-    targets = load_target_companies()
+    processed = set(state.get("processed", []))
+    feed = feedparser.parse(FORM4_FEED)
 
-    for ticker, identifier in targets.items():
-        cik = str(identifier)
-        if not cik.isdigit(): continue
+    for entry in feed.entries:
+        accession = entry.id.split("=")[-1]
 
-        res = requests.get(f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json", headers=HEADERS)
-        if res.status_code != 200: continue
-        
-        recent = res.json().get("filings", {}).get("recent", {})
-        for idx, form in enumerate(recent.get("form", [])):
-            if form == "4":
-                accession = recent["accessionNumber"][idx]
-                if state.get(cik) == accession: break
-                
-                acc_clean = accession.replace("-", "")
-                doc_name = recent["primaryDocument"][idx]
-                xml_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{doc_name}"
-                
-                try:
-                    xml_res = requests.get(xml_url, headers=HEADERS)
-                    root = ET.fromstring(xml_res.content)
-                    
-                    # 💡 조건 1: 직책 확인 (핵심 임원만)
-                    is_target, role_name = is_target_role(root)
-                    if not is_target: break
+        if accession in processed:
+            continue
 
-                    total_buy_usd = 0
-                    total_shares_bought = 0
-                    post_transaction_shares = 0
-                    
-                    for trans in root.findall(".//nonDerivativeTransaction"):
-                        t_code = trans.findtext(".//transactionCode")
-                        # 💡 조건 2: Open Market Buy (P)만 해당
-                        if t_code == "P":
-                            shares = float(trans.findtext(".//transactionShares/value") or 0)
-                            price = float(trans.findtext(".//transactionPricePerShare/value") or 0)
-                            total_buy_usd += (shares * price)
-                            total_shares_bought += shares
-                            
-                            # 거래 후 총 보유량 추출 (마지막 거래 기준)
-                            post_val = trans.findtext(".//postTransactionAmounts/sharesOwnedFollowingTransaction/value")
-                            if post_val:
-                                post_transaction_shares = float(post_val)
+        filing_url = entry.link
+        print("Processing:", accession)
 
-                    # 구매 내역이 없으면 패스
-                    if total_shares_bought == 0: break
+        try:
+            filing_page = requests.get(
+                filing_url,
+                headers=HEADERS,
+                timeout=30
+            )
 
-                    # 💡 조건 3: 증가율 계산
-                    increase_pct = 0
-                    if post_transaction_shares > total_shares_bought:
-                        prev_shares = post_transaction_shares - total_shares_bought
-                        increase_pct = (total_shares_bought / prev_shares) * 100
-                    elif post_transaction_shares == total_shares_bought:
-                        increase_pct = 100.0 # 기존에 없다가 새로 산 경우 (100% 증가로 취급)
+            if filing_page.status_code != 200:
+                continue
 
-                    # 원화 변환 (환율 1350원 기준)
-                    krw_amount = total_buy_usd * 1350
-                    
-                    # 💡 조건 4: 3억 원 이상 매수 OR 보유량 10% 이상 증가
-                    if krw_amount >= 300_000_000 or increase_pct >= 10.0:
-                        
-                        # 금액 텍스트 예쁘게 포맷팅 (예: 4억 8천만 원)
-                        eok = int(krw_amount // 100_000_000)
-                        cheon = int((krw_amount % 100_000_000) // 10_000_000)
-                        krw_text = f"{eok}억 {cheon}천만 원" if cheon > 0 else f"{eok}억 원"
-                        if eok == 0: krw_text = f"{int(krw_amount/10000)}만 원"
+            xml_url = None
+            for line in filing_page.text.split('"'):
+                if line.endswith(".xml"):
+                    if "Archives" in line:
+                        xml_url = "https://www.sec.gov" + line
+                        break
 
-                        link = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_clean}/{accession}-index.htm"
-                        
-                        embed = {
-                            "title": f"💰 {role_name} 자사주 매수",
-                            "color": 3066993,
-                            "description": (
-                                f"**종목:** {ticker}\n\n"
-                                f"**매수금액:**\n약 {krw_text}\n\n"
-                                f"**보유량:**\n+{increase_pct:.1f}%\n\n"
-                                f"[SEC 원문 확인]({link})"
-                            )
-                        }
-                        if WEBHOOK_URL: requests.post(WEBHOOK_URL, json={"embeds": [embed]})
-                        
-                except Exception as e:
-                    print(f"Form4 파싱 에러 ({ticker}): {e}")
-                
-                state[cik] = accession
-                break # 최신 1개만 처리
+            if not xml_url:
+                processed.add(accession)
+                continue
+            
+            # SEC 서버 과부하 방지 및 IP 차단 예방
+            time.sleep(0.2)
 
-    with open(STATE_FILE, "w") as f: json.dump(state, f)
+            xml_res = requests.get(
+                xml_url,
+                headers=HEADERS,
+                timeout=30
+            )
+
+            if xml_res.status_code != 200:
+                continue
+
+            root = ET.fromstring(xml_res.content)
+            issuer = root.findtext(".//issuerTradingSymbol")
+
+            if not issuer:
+                issuer = "UNKNOWN"
+
+            is_target, role_name = is_target_role(root)
+
+            if not is_target:
+                processed.add(accession)
+                continue
+
+            total_buy_usd = 0
+            total_shares_bought = 0
+            post_transaction_shares = 0
+
+            for trans in root.findall(".//nonDerivativeTransaction"):
+                t_code = trans.findtext(".//transactionCode")
+
+                if t_code != "P":
+                    continue
+
+                shares = float(trans.findtext(".//transactionShares/value") or 0)
+                price = float(trans.findtext(".//transactionPricePerShare/value") or 0)
+
+                total_buy_usd += shares * price
+                total_shares_bought += shares
+
+                post_val = trans.findtext(
+                    ".//postTransactionAmounts/sharesOwnedFollowingTransaction/value"
+                )
+
+                if post_val:
+                    post_transaction_shares = float(post_val)
+
+            if total_shares_bought == 0:
+                processed.add(accession)
+                continue
+
+            increase_pct = 0
+            if post_transaction_shares > total_shares_bought:
+                prev_shares = post_transaction_shares - total_shares_bought
+                increase_pct = (total_shares_bought / prev_shares) * 100
+            elif post_transaction_shares == total_shares_bought:
+                increase_pct = 100
+
+            krw_amount = total_buy_usd * 1350
+
+            if krw_amount >= 300_000_000 or increase_pct >= 10:
+                eok = int(krw_amount // 100_000_000)
+                cheon = int((krw_amount % 100_000_000) // 10_000_000)
+
+                if eok == 0:
+                    krw_text = f"{int(krw_amount/10000)}만 원"
+                else:
+                    krw_text = f"{eok}억 {cheon}천만 원"
+
+                send_discord(issuer, role_name, krw_text, increase_pct, filing_url)
+
+            processed.add(accession)
+
+        except Exception as e:
+            print("ERROR:", accession, e)
+
+    state["processed"] = list(processed)[-2000:]
+    save_state(state)
 
 if __name__ == "__main__":
     run()
