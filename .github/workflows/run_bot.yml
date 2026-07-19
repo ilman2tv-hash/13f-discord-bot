@@ -1,47 +1,125 @@
-name: SEC 자동 알리미 봇
+name: SEC 자동 알리미 + 시장 뉴스 봇
+
 
 on:
+
   workflow_dispatch:
+
   schedule:
-    # 매주 월~금, 매 정각(1시간 간격)마다 24시간 내내 순찰을 돕니다.
-    - cron: '0 * * * 1-5' 
+
+    # 월~금 매시간 순찰
+    - cron: '0 * * * 1-5'
+
 
 jobs:
+
+
   build:
+
+
     runs-on: ubuntu-latest
+
+
     permissions:
-      contents: write # 깃허브에 .json 상태 파일을 저장할 권한
+
+      contents: write
+
+
 
     steps:
+
+
       - name: 코드 체크아웃
+
         uses: actions/checkout@v3
 
+
+
       - name: 파이썬 세팅
+
         uses: actions/setup-python@v4
+
         with:
+
           python-version: '3.10'
 
+
+
       - name: 필수 라이브러리 설치
-        run: pip install requests feedparser
+
+        run: |
+
+          pip install requests feedparser
+
+
+
+      # ==========================
+      # 13F 기관 보유보고서
+      # ==========================
 
       - name: 13F 운용보고서 봇 실행
+
         env:
+
           SEC_13F_WEBHOOK_URL: ${{ secrets.SEC_13F_WEBHOOK_URL }}
-        run: python 13f_bot.py
 
-      - name: 대주주/8-K 공시 봇 실행
+        run:
+
+          python 13f_bot.py
+
+
+
+      # ==========================
+      # 대주주 / 8-K
+      # ==========================
+
+      - name: 대주주 및 8-K 공시 봇 실행
+
         env:
+
           SEC_OWNERSHIP_WEBHOOK_URL: ${{ secrets.SEC_OWNERSHIP_WEBHOOK_URL }}
-        run: python ownership_bot.py
 
-      - name: 내부자 거래 봇 실행
+        run:
+
+          python ownership_bot.py
+
+
+
+      # ==========================
+      # 시장 뉴스
+      # Form4 대체
+      # ==========================
+
+      - name: 시장 뉴스 봇 실행
+
         env:
-          SEC_FORM4_WEBHOOK_URL: ${{ secrets.SEC_FORM4_WEBHOOK_URL }}
-        run: python form4_bot.py
 
-      - name: 변경된 상태 파일 저장 (Git Commit & Push)
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+
+        run:
+
+          python news_bot.py
+
+
+
+      # ==========================
+      # 상태 저장
+      # ==========================
+
+      - name: 변경된 상태 파일 저장
+
         run: |
+
           git config --local user.email "action@github.com"
+
           git config --local user.name "GitHub Action"
+
           git add *.json
-          git diff-index --quiet HEAD || (git commit -m "🔄 정기 순찰: 공시 감지 및 데이터 업데이트" && git push)
+
+          git diff-index --quiet HEAD || (
+
+          git commit -m "🔄 정기 순찰: SEC 및 뉴스 데이터 업데이트"
+
+          && git push
+
+          )
