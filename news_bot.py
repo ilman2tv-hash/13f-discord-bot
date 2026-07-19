@@ -9,13 +9,16 @@ from deep_translator import GoogleTranslator
 
 
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
-
 CACHE_FILE = "news_cache.json"
 
 
+# =========================
+# 뉴스 출처
+# =========================
+
 RSS_LIST = {
 
-    "Reuters":
+    "Reuters Top":
     "https://feeds.reuters.com/reuters/topNews",
 
     "Reuters Business":
@@ -24,120 +27,156 @@ RSS_LIST = {
     "CNBC":
     "https://www.cnbc.com/id/100003114/device/rss/rss.html",
 
-    "Yahoo Finance":
-    "https://finance.yahoo.com/news/rssindex",
+    "AP News":
+    "https://apnews.com/hub/ap-top-news/rss.xml"
 
 }
 
 
-BREAKING_KEYWORDS = [
+# =========================
+# 점수 시스템
+# =========================
+
+SCORE_RULES = {
 
     # 경제 지표
-    "cpi",
-    "consumer price index",
+    "cpi": 10,
+    "consumer price index": 10,
 
-    "ppi",
-    "producer price index",
+    "ppi": 10,
+    "producer price index": 10,
 
-    "inflation",
-    "jobs report",
-    "employment",
-    "unemployment",
-    "payroll",
+    "inflation": 9,
+    "employment": 9,
+    "unemployment": 9,
+    "jobs report": 9,
+    "payroll": 9,
+
+    "gdp": 9,
+    "recession": 9,
 
     # 연준
-    "fed",
-    "fomc",
-    "powell",
-    "interest rate",
-    "rate cut",
-    "rate hike",
 
-    # 전쟁 / 지정학
-    "war",
-    "missile",
-    "attack",
-    "drone",
-    "explosion",
+    "fed": 10,
+    "fomc": 10,
+    "powell": 10,
+    "interest rate": 10,
+    "rate cut": 10,
+    "rate hike": 10,
 
-    "iran",
-    "israel",
+    # 대통령 / 정부
 
-    "russia",
-    "ukraine",
+    "trump": 8,
+    "president": 8,
+    "white house": 8,
 
-    "china",
-    "taiwan",
+    "executive order": 9,
+    "treasury": 8,
+    "congress": 7,
 
-    # 관세 / 제재
-    "tariff",
-    "sanction",
+    # 전쟁 / 안보
+
+    "war": 10,
+    "attack": 10,
+    "missile": 10,
+    "airstrike": 10,
+    "explosion": 9,
+    "military": 9,
+
+    "iran": 9,
+    "israel": 9,
+
+    "russia": 9,
+    "ukraine": 9,
+
+    "china": 8,
+    "taiwan": 8,
+
+    "nuclear": 10,
+    "terror": 10,
+
+    # 경제 정책
+
+    "tariff": 10,
+    "sanction": 9,
+    "tax": 8,
 
     # 에너지
-    "oil",
-    "crude",
+
+    "oil": 8,
+    "crude": 8,
+    "opec": 9,
+
+    # 시장
+
+    "bankruptcy": 10,
+    "earnings": 7,
+    "guidance": 7,
+    "forecast": 7,
+
+    "nasdaq": 7,
+    "s&p": 7,
+    "dow": 7,
 
     # 우주
-    "spacex",
-    "starship",
-    "rocket",
-    "launch",
-    "nasa",
 
-    # 긴급 속보
-    "breaking",
-    "urgent",
-    "emergency"
-]
+    "spacex": 7,
+    "starship": 7,
+    "rocket": 6,
+    "launch": 6,
+    "nasa": 6
 
+}
+
+
+# =========================
+# 섹터
+# =========================
 
 SECTOR = {
 
-    "ai": "AI",
+    "fed": "금리",
 
-    "artificial intelligence": "AI",
-
-    "chip": "반도체",
-
-    "semiconductor": "반도체",
+    "inflation": "경제",
 
     "oil": "에너지",
 
-    "fed": "금리",
-
-    "interest rate": "금리",
-
     "spacex": "우주",
 
-    "rocket": "우주"
+    "rocket": "우주",
+
+    "nvidia": "반도체",
+
+    "ai": "AI",
+
+    "war": "국방"
 
 }
 
+
+# =========================
+# 종목
+# =========================
 
 TICKERS = {
 
     "nvidia": "NVDA",
-
     "apple": "AAPL",
-
     "microsoft": "MSFT",
-
     "tesla": "TSLA",
-
     "amazon": "AMZN",
-
     "google": "GOOGL",
-
     "meta": "META",
-
     "amd": "AMD",
-
     "intel": "INTC",
-
     "tsm": "TSM"
 
 }
 
+
+# =========================
+# 캐시
+# =========================
 
 def load_cache():
 
@@ -168,6 +207,10 @@ def save_cache(cache):
         )
 
 
+# =========================
+# 번역
+# =========================
+
 def translate(text):
 
     if not text:
@@ -177,8 +220,10 @@ def translate(text):
     try:
 
         return GoogleTranslator(
+
             source="auto",
             target="ko"
+
         ).translate(text)
 
     except:
@@ -186,15 +231,29 @@ def translate(text):
         return text
 
 
+# =========================
+# 분석
+# =========================
+
 def analyze(text):
 
     text = text.lower()
 
-    score = 6
+    score = 0
 
     sectors = []
 
     tickers = []
+
+    reasons = []
+
+    for key, value in SCORE_RULES.items():
+
+        if key in text:
+
+            score += value
+
+            reasons.append(key)
 
     for key, value in SECTOR.items():
 
@@ -208,86 +267,34 @@ def analyze(text):
 
             tickers.append(value)
 
-    if any(
-        word in text
-        for word in [
-            "war",
-            "missile",
-            "attack",
-            "explosion"
-        ]
-    ):
+    score = min(score, 10)
 
-        direction = "🔴 지정학적 위험"
+    if score >= 9:
 
-        reason = (
-            "전쟁·공격 뉴스는 "
-            "시장 변동성을 키울 수 있습니다."
-        )
+        level = "🚨 초대형 뉴스"
 
-        score = 9
+    elif score >= 7:
 
-    elif any(
-        word in text
-        for word in [
-            "cpi",
-            "ppi",
-            "inflation",
-            "fed",
-            "fomc"
-        ]
-    ):
-
-        direction = "🟡 경제 이벤트"
-
-        reason = (
-            "금리·물가 관련 뉴스는 "
-            "미국 증시에 큰 영향을 줍니다."
-        )
-
-        score = 9
-
-    elif any(
-        word in text
-        for word in [
-            "spacex",
-            "rocket",
-            "launch"
-        ]
-    ):
-
-        direction = "🚀 기술 이벤트"
-
-        reason = (
-            "우주·기술 산업 관련 "
-            "대형 이벤트입니다."
-        )
-
-        score = 7
+        level = "⚠️ 중요 뉴스"
 
     else:
 
-        direction = "🟢 시장 뉴스"
-
-        reason = (
-            "미국 시장과 관련된 "
-            "중요 뉴스입니다."
-        )
+        level = "📰 일반 뉴스"
 
     return (
 
-        direction,
-
+        level,
         score,
-
-        reason,
-
+        reasons[:5],
         list(set(sectors)),
-
         list(set(tickers))
 
     )
 
+
+# =========================
+# 디스코드 전송
+# =========================
 
 def send_discord(
 
@@ -295,9 +302,9 @@ def send_discord(
     summary,
     link,
     source,
-    direction,
+    level,
     score,
-    reason,
+    reasons,
     sectors,
     tickers
 
@@ -307,12 +314,9 @@ def send_discord(
         timezone.utc
     ) + timedelta(hours=9)
 
-    if not summary.strip():
+    if not summary:
 
-        summary = (
-            "기사 요약이 제공되지 않았습니다.\n"
-            "원문 링크를 확인해 주세요."
-        )
+        summary = "기사 요약이 없습니다."
 
     message = f"""
 
@@ -321,14 +325,19 @@ def send_discord(
 {summary}
 
 
-📊 투자자 해석
+🔥 중요도
 
-{reason}
+{score}/10
 
 
-📈 시장 영향
+📌 분류
 
-{direction}
+{level}
+
+
+📊 감지 키워드
+
+{', '.join(reasons)}
 
 
 🏢 영향 섹터
@@ -336,14 +345,9 @@ def send_discord(
 {', '.join(sectors) if sectors else '시장 전체'}
 
 
-📌 관련 종목
+📈 관련 종목
 
-{', '.join(tickers) if tickers else '확인 필요'}
-
-
-🔥 중요도
-
-{score}/10
+{', '.join(tickers) if tickers else '없음'}
 
 
 🔗 원문 링크
@@ -373,13 +377,13 @@ def send_discord(
                 {
 
                     "title":
-                    "🚨 미국시장 핵심 뉴스\n" + title,
+                    "🚨 미국 시장 속보\n" + title,
 
                     "description":
                     message,
 
                     "color":
-                    3447003
+                    16711680
 
                 }
 
@@ -390,6 +394,10 @@ def send_discord(
     )
 
 
+# =========================
+# 메인
+# =========================
+
 def main():
 
     cache = load_cache()
@@ -398,28 +406,17 @@ def main():
 
         feed = feedparser.parse(url)
 
-        for item in feed.entries[:20]:
+        for item in feed.entries[:30]:
 
-            title = item.get(
-                "title",
-                ""
-            )
+            title = item.get("title", "")
 
-            summary = item.get(
-                "summary",
-                ""
-            )
+            summary = item.get("summary", "")
 
-            link = item.get(
-                "link",
-                ""
-            )
+            link = item.get("link", "")
 
             uid = hashlib.md5(
 
-                (
-                    title + link
-                ).encode()
+                (title + link).encode()
 
             ).hexdigest()
 
@@ -427,7 +424,7 @@ def main():
 
                 continue
 
-            full = (
+            full_text = (
 
                 title
                 + " "
@@ -435,24 +432,17 @@ def main():
 
             )
 
-            full_lower = full.lower()
+            level, score, reasons, sectors, tickers = analyze(
 
-            if not any(
-
-                keyword in full_lower
-
-                for keyword
-                in BREAKING_KEYWORDS
-
-            ):
-
-                continue
-
-            direction, score, reason, sectors, tickers = analyze(
-
-                full
+                full_text
 
             )
+
+            # 중요 뉴스만 보내기
+
+            if score < 7:
+
+                continue
 
             cache.add(uid)
 
@@ -466,11 +456,11 @@ def main():
 
                 source,
 
-                direction,
+                level,
 
                 score,
 
-                reason,
+                reasons,
 
                 sectors,
 
