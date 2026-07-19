@@ -5,6 +5,8 @@ import requests
 import feedparser
 
 from datetime import datetime, timezone, timedelta
+from deep_translator import GoogleTranslator
+
 
 
 WEBHOOK_URL = os.environ.get(
@@ -18,7 +20,6 @@ CACHE_FILE = "news_cache.json"
 
 RSS_LIST = {
 
-
     "Yahoo Finance":
     "https://finance.yahoo.com/news/rssindex",
 
@@ -30,51 +31,43 @@ RSS_LIST = {
     "MarketWatch":
     "https://feeds.marketwatch.com/marketwatch/topstories/",
 
-
 }
 
 
 
 KEYWORDS = [
 
-    # FED
     "fed",
     "federal reserve",
     "interest rate",
     "rate cut",
     "rate hike",
 
-    # 경제
     "cpi",
     "inflation",
     "jobs",
     "unemployment",
 
-    # 시장
     "nasdaq",
     "s&p",
     "dow",
 
-    # AI 반도체
-    "ai",
-    "artificial intelligence",
     "nvidia",
-    "semiconductor",
-    "chip",
-
-    # 빅테크
     "apple",
     "microsoft",
     "google",
     "amazon",
     "tesla",
 
-    # 리스크
+    "ai",
+    "artificial intelligence",
+    "semiconductor",
+    "chip",
+
     "war",
     "oil",
     "sanction",
 
-    # 기업 이벤트
     "earnings",
     "guidance",
     "merger",
@@ -126,6 +119,22 @@ def make_id(text):
 
 
 
+def translate(text):
+
+    try:
+
+        return GoogleTranslator(
+            source="auto",
+            target="ko"
+        ).translate(text)
+
+
+    except Exception:
+
+        return text
+
+
+
 def score_news(text):
 
     score = 0
@@ -133,9 +142,9 @@ def score_news(text):
     text = text.lower()
 
 
-    for k in KEYWORDS:
+    for word in KEYWORDS:
 
-        if k in text:
+        if word in text:
 
             score += 1
 
@@ -151,11 +160,14 @@ def send_discord(
     score
 ):
 
-
     kst = (
+
         datetime.now(timezone.utc)
+
         +
+
         timedelta(hours=9)
+
     )
 
 
@@ -166,18 +178,17 @@ def send_discord(
 
             {
 
+                "title":
+                f"🚨 미국시장 뉴스 중요도 {score}/10",
 
-            "title":
-            f"🚨 MARKET NEWS {score}/10",
 
-
-            "description":
+                "description":
 
 f"""
 **{title}**
 
 
-{summary[:600]}
+{summary}
 
 
 📰 출처:
@@ -189,7 +200,6 @@ f"""
 
 """
 
-
             }
 
         ]
@@ -199,9 +209,13 @@ f"""
 
 
     requests.post(
+
         WEBHOOK_URL,
+
         json=data,
+
         timeout=10
+
     )
 
 
@@ -228,7 +242,7 @@ def main():
 
 
 
-        for item in feed.entries[:15]:
+        for item in feed.entries[:20]:
 
 
             title = item.title
@@ -240,15 +254,24 @@ def main():
             )
 
 
-            text = title + summary
+            full_text = (
+
+                title
+
+                +
+
+                summary
+
+            )
+
+
+            score = score_news(
+                full_text
+            )
 
 
 
-            score = score_news(text)
-
-
-
-            # 중요 뉴스만
+            # 중요도 낮은 뉴스 제거
 
             if score < 2:
 
@@ -270,11 +293,19 @@ def main():
 
 
 
+            ko_title = translate(title)
+
+            ko_summary = translate(
+                summary[:700]
+            )
+
+
+
             send_discord(
 
-                title,
+                ko_title,
 
-                summary,
+                ko_summary,
 
                 source,
 
