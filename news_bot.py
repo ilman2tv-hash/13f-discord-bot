@@ -4,8 +4,9 @@ import hashlib
 import requests
 import feedparser
 
-from datetime import datetime, timezone, timedelta
+from datetime import timezone, timedelta
 from deep_translator import GoogleTranslator
+from email.utils import parsedate_to_datetime
 
 
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
@@ -34,12 +35,13 @@ RSS_LIST = {
 
 
 # =========================
-# 점수 시스템
+# 중요도 점수
 # =========================
 
 SCORE_RULES = {
 
     # 경제 지표
+
     "cpi": 10,
     "consumer price index": 10,
 
@@ -107,12 +109,14 @@ SCORE_RULES = {
     "crude": 8,
     "opec": 9,
 
-    # 시장
+    # 기업
 
     "bankruptcy": 10,
     "earnings": 7,
     "guidance": 7,
     "forecast": 7,
+
+    # 시장
 
     "nasdaq": 7,
     "s&p": 7,
@@ -125,51 +129,6 @@ SCORE_RULES = {
     "rocket": 6,
     "launch": 6,
     "nasa": 6
-
-}
-
-
-# =========================
-# 섹터
-# =========================
-
-SECTOR = {
-
-    "fed": "금리",
-
-    "inflation": "경제",
-
-    "oil": "에너지",
-
-    "spacex": "우주",
-
-    "rocket": "우주",
-
-    "nvidia": "반도체",
-
-    "ai": "AI",
-
-    "war": "국방"
-
-}
-
-
-# =========================
-# 종목
-# =========================
-
-TICKERS = {
-
-    "nvidia": "NVDA",
-    "apple": "AAPL",
-    "microsoft": "MSFT",
-    "tesla": "TSLA",
-    "amazon": "AMZN",
-    "google": "GOOGL",
-    "meta": "META",
-    "amd": "AMD",
-    "intel": "INTC",
-    "tsm": "TSM"
 
 }
 
@@ -220,10 +179,8 @@ def translate(text):
     try:
 
         return GoogleTranslator(
-
             source="auto",
             target="ko"
-
         ).translate(text)
 
     except:
@@ -232,20 +189,14 @@ def translate(text):
 
 
 # =========================
-# 분석
+# 중요도 계산
 # =========================
 
-def analyze(text):
+def get_score(text):
 
     text = text.lower()
 
     score = 0
-
-    sectors = []
-
-    tickers = []
-
-    reasons = []
 
     for key, value in SCORE_RULES.items():
 
@@ -253,43 +204,40 @@ def analyze(text):
 
             score += value
 
-            reasons.append(key)
+    return min(score, 10)
 
-    for key, value in SECTOR.items():
 
-        if key in text:
+# =========================
+# 한국 시간 변환
+# =========================
 
-            sectors.append(value)
+def to_kst(published):
 
-    for key, value in TICKERS.items():
+    if not published:
 
-        if key in text:
+        return "시간 정보 없음"
 
-            tickers.append(value)
+    try:
 
-    score = min(score, 10)
+        dt = parsedate_to_datetime(
+            published
+        )
 
-    if score >= 9:
+        kst = dt.astimezone(
 
-        level = "🚨 초대형 뉴스"
+            timezone(
+                timedelta(hours=9)
+            )
 
-    elif score >= 7:
+        )
 
-        level = "⚠️ 중요 뉴스"
+        return kst.strftime(
+            "%Y-%m-%d %H:%M KST"
+        )
 
-    else:
+    except:
 
-        level = "📰 일반 뉴스"
-
-    return (
-
-        level,
-        score,
-        reasons[:5],
-        list(set(sectors)),
-        list(set(tickers))
-
-    )
+        return published
 
 
 # =========================
@@ -302,21 +250,17 @@ def send_discord(
     summary,
     link,
     source,
-    level,
     score,
-    reasons,
-    sectors,
-    tickers
+    published
 
 ):
 
-    kst = datetime.now(
-        timezone.utc
-    ) + timedelta(hours=9)
-
     if not summary:
 
-        summary = "기사 요약이 없습니다."
+        summary = (
+            "기사 요약이 없습니다.\n"
+            "원문 링크를 확인해 주세요."
+        )
 
     message = f"""
 
@@ -330,26 +274,6 @@ def send_discord(
 {score}/10
 
 
-📌 분류
-
-{level}
-
-
-📊 감지 키워드
-
-{', '.join(reasons)}
-
-
-🏢 영향 섹터
-
-{', '.join(sectors) if sectors else '시장 전체'}
-
-
-📈 관련 종목
-
-{', '.join(tickers) if tickers else '없음'}
-
-
 🔗 원문 링크
 
 {link}
@@ -360,9 +284,9 @@ def send_discord(
 {source}
 
 
-⏰ 시간
+🕒 뉴스 시간
 
-{kst.strftime('%Y-%m-%d %H:%M KST')}
+{published}
 
 """
 
@@ -408,15 +332,32 @@ def main():
 
         for item in feed.entries[:30]:
 
-            title = item.get("title", "")
+            title = item.get(
+                "title",
+                ""
+            )
 
-            summary = item.get("summary", "")
+            summary = item.get(
+                "summary",
+                ""
+            )
 
-            link = item.get("link", "")
+            link = item.get(
+                "link",
+                ""
+            )
+
+            published = item.get(
+                "published",
+                ""
+            )
 
             uid = hashlib.md5(
 
-                (title + link).encode()
+                (
+                    title +
+                    link
+                ).encode()
 
             ).hexdigest()
 
@@ -426,19 +367,17 @@ def main():
 
             full_text = (
 
-                title
-                + " "
-                + summary
+                title +
+                " " +
+                summary
 
             )
 
-            level, score, reasons, sectors, tickers = analyze(
-
+            score = get_score(
                 full_text
-
             )
 
-            # 중요 뉴스만 보내기
+            # 중요 뉴스만 전송
 
             if score < 7:
 
@@ -450,21 +389,19 @@ def main():
 
                 translate(title),
 
-                translate(summary[:400]),
+                translate(
+                    summary[:400]
+                ),
 
                 link,
 
                 source,
 
-                level,
-
                 score,
 
-                reasons,
-
-                sectors,
-
-                tickers
+                to_kst(
+                    published
+                )
 
             )
 
