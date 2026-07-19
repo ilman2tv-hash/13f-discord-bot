@@ -8,117 +8,135 @@ from datetime import datetime, timezone, timedelta
 from deep_translator import GoogleTranslator
 
 
-WEBHOOK_URL = os.environ.get(
-    "DISCORD_WEBHOOK"
-)
-
+WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 
 CACHE_FILE = "news_cache.json"
 
 
 RSS_LIST = {
 
-    "Yahoo Finance":
-    "https://finance.yahoo.com/news/rssindex",
+    "Reuters":
+    "https://feeds.reuters.com/reuters/topNews",
+
+    "Reuters Business":
+    "https://feeds.reuters.com/reuters/businessNews",
 
     "CNBC":
     "https://www.cnbc.com/id/100003114/device/rss/rss.html",
 
-    "MarketWatch":
-    "https://feeds.marketwatch.com/marketwatch/topstories/",
+    "Yahoo Finance":
+    "https://finance.yahoo.com/news/rssindex",
 
 }
 
 
+BREAKING_KEYWORDS = [
 
-POSITIVE = [
+    # 경제 지표
+    "cpi",
+    "consumer price index",
 
-    "beat",
-    "beats",
-    "upgrade",
-    "raises",
-    "growth",
-    "record",
-    "approval",
-    "partnership",
-    "investment",
-    "ai",
-    "artificial intelligence",
-    "rate cut",
-    "lower rates",
-    "strong earnings"
+    "ppi",
+    "producer price index",
 
-]
-
-
-NEGATIVE = [
-
-    "miss",
-    "downgrade",
-    "warning",
-    "lawsuit",
-    "investigation",
-    "recession",
     "inflation",
+    "jobs report",
+    "employment",
+    "unemployment",
+    "payroll",
+
+    # 연준
+    "fed",
+    "fomc",
+    "powell",
+    "interest rate",
+    "rate cut",
     "rate hike",
+
+    # 전쟁 / 지정학
+    "war",
+    "missile",
+    "attack",
+    "drone",
+    "explosion",
+
+    "iran",
+    "israel",
+
+    "russia",
+    "ukraine",
+
+    "china",
+    "taiwan",
+
+    # 관세 / 제재
+    "tariff",
     "sanction",
-    "war"
 
+    # 에너지
+    "oil",
+    "crude",
+
+    # 우주
+    "spacex",
+    "starship",
+    "rocket",
+    "launch",
+    "nasa",
+
+    # 긴급 속보
+    "breaking",
+    "urgent",
+    "emergency"
 ]
-
 
 
 SECTOR = {
 
-    "ai":
-    "AI",
+    "ai": "AI",
 
-    "artificial intelligence":
-    "AI",
+    "artificial intelligence": "AI",
 
-    "chip":
-    "반도체",
+    "chip": "반도체",
 
-    "semiconductor":
-    "반도체",
+    "semiconductor": "반도체",
 
-    "oil":
-    "에너지",
+    "oil": "에너지",
 
-    "fed":
-    "금리",
+    "fed": "금리",
 
-    "interest rate":
-    "금리",
+    "interest rate": "금리",
+
+    "spacex": "우주",
+
+    "rocket": "우주"
 
 }
-
 
 
 TICKERS = {
 
-    "nvidia":"NVDA",
+    "nvidia": "NVDA",
 
-    "apple":"AAPL",
+    "apple": "AAPL",
 
-    "microsoft":"MSFT",
+    "microsoft": "MSFT",
 
-    "tesla":"TSLA",
+    "tesla": "TSLA",
 
-    "amazon":"AMZN",
+    "amazon": "AMZN",
 
-    "google":"GOOGL",
+    "google": "GOOGL",
 
-    "meta":"META",
+    "meta": "META",
 
-    "amd":"AMD",
+    "amd": "AMD",
 
-    "intel":"INTC",
+    "intel": "INTC",
 
-    "tsm":"TSM"
+    "tsm": "TSM"
 
 }
-
 
 
 def load_cache():
@@ -133,7 +151,6 @@ def load_cache():
             return set(json.load(f))
 
     return set()
-
 
 
 def save_cache(cache):
@@ -151,8 +168,11 @@ def save_cache(cache):
         )
 
 
-
 def translate(text):
+
+    if not text:
+
+        return ""
 
     try:
 
@@ -166,89 +186,99 @@ def translate(text):
         return text
 
 
-
 def analyze(text):
 
-    text=text.lower()
+    text = text.lower()
 
+    score = 6
 
-    pos=sum(
-        1 for x in POSITIVE
-        if x in text
-    )
+    sectors = []
 
+    tickers = []
 
-    neg=sum(
-        1 for x in NEGATIVE
-        if x in text
-    )
+    for key, value in SECTOR.items():
 
+        if key in text:
 
-    score=5
+            sectors.append(value)
 
+    for key, value in TICKERS.items():
 
-    if pos>neg:
+        if key in text:
 
-        direction="🟢 긍정"
+            tickers.append(value)
 
-        score+=pos
+    if any(
+        word in text
+        for word in [
+            "war",
+            "missile",
+            "attack",
+            "explosion"
+        ]
+    ):
 
+        direction = "🔴 지정학적 위험"
 
-        reason=(
-            "기업 성장 기대 또는 "
-            "시장 심리 개선 요인"
+        reason = (
+            "전쟁·공격 뉴스는 "
+            "시장 변동성을 키울 수 있습니다."
         )
 
+        score = 9
 
-    elif neg>pos:
+    elif any(
+        word in text
+        for word in [
+            "cpi",
+            "ppi",
+            "inflation",
+            "fed",
+            "fomc"
+        ]
+    ):
 
-        direction="🔴 부정"
+        direction = "🟡 경제 이벤트"
 
-        score+=neg
-
-
-        reason=(
-            "실적 우려 또는 "
-            "투자심리 악화 가능성"
+        reason = (
+            "금리·물가 관련 뉴스는 "
+            "미국 증시에 큰 영향을 줍니다."
         )
 
+        score = 9
+
+    elif any(
+        word in text
+        for word in [
+            "spacex",
+            "rocket",
+            "launch"
+        ]
+    ):
+
+        direction = "🚀 기술 이벤트"
+
+        reason = (
+            "우주·기술 산업 관련 "
+            "대형 이벤트입니다."
+        )
+
+        score = 7
 
     else:
 
-        direction="🟡 중립"
+        direction = "🟢 시장 뉴스"
 
-        reason=(
-            "추가 정보 확인 필요"
+        reason = (
+            "미국 시장과 관련된 "
+            "중요 뉴스입니다."
         )
-
-
-    sectors=[]
-
-
-    for k,v in SECTOR.items():
-
-        if k in text:
-
-            sectors.append(v)
-
-
-
-    tickers=[]
-
-
-    for k,v in TICKERS.items():
-
-        if k in text:
-
-            tickers.append(v)
-
-
 
     return (
 
         direction,
 
-        min(score,10),
+        score,
 
         reason,
 
@@ -259,26 +289,32 @@ def analyze(text):
     )
 
 
-
 def send_discord(
+
     title,
     summary,
+    link,
     source,
     direction,
     score,
     reason,
     sectors,
     tickers
+
 ):
 
-
-    kst=datetime.now(
+    kst = datetime.now(
         timezone.utc
-    )+timedelta(hours=9)
+    ) + timedelta(hours=9)
 
+    if not summary.strip():
 
+        summary = (
+            "기사 요약이 제공되지 않았습니다.\n"
+            "원문 링크를 확인해 주세요."
+        )
 
-    message=f"""
+    message = f"""
 
 📝 핵심 내용
 
@@ -295,27 +331,36 @@ def send_discord(
 {direction}
 
 
-영향 섹터:
+🏢 영향 섹터
+
 {', '.join(sectors) if sectors else '시장 전체'}
 
 
-관련 종목:
+📌 관련 종목
+
 {', '.join(tickers) if tickers else '확인 필요'}
 
 
-🔥 중요도:
+🔥 중요도
+
 {score}/10
 
 
-📰 출처:
+🔗 원문 링크
+
+{link}
+
+
+📰 출처
+
 {source}
 
 
-⏰ 시간:
+⏰ 시간
+
 {kst.strftime('%Y-%m-%d %H:%M KST')}
 
 """
-
 
     requests.post(
 
@@ -323,15 +368,18 @@ def send_discord(
 
         json={
 
-            "embeds":[
+            "embeds": [
 
                 {
 
-                "title":
-                "🚨 미국시장 핵심 뉴스\n"+title,
+                    "title":
+                    "🚨 미국시장 핵심 뉴스\n" + title,
 
-                "description":
-                message
+                    "description":
+                    message,
+
+                    "color":
+                    3447003
 
                 }
 
@@ -342,64 +390,79 @@ def send_discord(
     )
 
 
-
 def main():
 
-    cache=load_cache()
+    cache = load_cache()
 
+    for source, url in RSS_LIST.items():
 
+        feed = feedparser.parse(url)
 
-    for source,url in RSS_LIST.items():
+        for item in feed.entries[:20]:
 
-        feed=feedparser.parse(url)
+            title = item.get(
+                "title",
+                ""
+            )
 
-
-
-        for item in feed.entries[:15]:
-
-            title=item.title
-
-            summary=item.get(
+            summary = item.get(
                 "summary",
                 ""
             )
 
+            link = item.get(
+                "link",
+                ""
+            )
 
-            uid=hashlib.md5(
-                title.encode()
+            uid = hashlib.md5(
+
+                (
+                    title + link
+                ).encode()
+
             ).hexdigest()
-
-
 
             if uid in cache:
 
                 continue
 
+            full = (
 
+                title
+                + " "
+                + summary
 
-            full=title+" "+summary
+            )
 
+            full_lower = full.lower()
 
+            if not any(
 
-            direction,score,reason,sectors,tickers=analyze(full)
+                keyword in full_lower
 
+                for keyword
+                in BREAKING_KEYWORDS
 
-
-            if score < 6:
+            ):
 
                 continue
 
+            direction, score, reason, sectors, tickers = analyze(
 
+                full
+
+            )
 
             cache.add(uid)
-
-
 
             send_discord(
 
                 translate(title),
 
-                translate(summary[:800]),
+                translate(summary[:400]),
+
+                link,
 
                 source,
 
@@ -415,12 +478,9 @@ def main():
 
             )
 
-
-
     save_cache(cache)
 
 
-
-if __name__=="__main__":
+if __name__ == "__main__":
 
     main()
